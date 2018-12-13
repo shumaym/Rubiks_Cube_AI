@@ -9,7 +9,7 @@ Currently only supports the rotation of faces, and so cubes larger than 3x3x3 ca
 ```ai_learner.py``` attempts to solve a Rubik's Cube strictly through reinforcement learning.
 A shallow Neural Network is currently used, and more emphasis is placed on not overfitting, rather than learning quickly.
 Simple heuristics are in place to reward the AI; primarily, it is concerned with the number of correct colours on each face of the cube.
-Extra points are given for full rows or columns of the correct colour, as well as for corners (not taking into account whether each corner is also correct for the adjacent faces).
+Extra points are given if corner pieces are correct for all adjacent sides.
 
 A <a href="https://pytorch.org/tutorials/intermediate/reinforcement_q_learning.html">PyTorch tutorial</a> was roughly followed to implement the AI.
 

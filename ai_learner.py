@@ -8,7 +8,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from collections import namedtuple
 import signal
-from rubiks import Cube
+from rubiks import Cube, face_relations
 
 # Number of squares along each edge of the Cube.
 edge_length = 3
@@ -100,7 +100,7 @@ class ReplayMemory(object):
 
 
 # Parameters specific to the AI.
-BATCH_SIZE = 16
+BATCH_SIZE = 8
 GAMMA = 0.999
 EPS_START = 0.9
 EPS_END = 0.025
@@ -112,7 +112,7 @@ target_net = NN()
 target_net.load_state_dict(policy_net.state_dict())
 target_net.eval()
 optimizer = optim.RMSprop(policy_net.parameters())
-memory = ReplayMemory(10000)
+memory = ReplayMemory(2000)
 steps_done = 0
 
 
@@ -162,51 +162,255 @@ def optimize_model():
 
 
 def reward_function(cube):
-	""" Calculates a cube's number of correctly-coloured squares, along with a reward. """
+	""" Calculates a cube's reward, which is a scalar measurement of how good it is. """
 	total_correct = 0.
 	reward = 0.
 	edge_length = cube.edge_length
+	total_correct_corners = 0
 
 	# Look at each face of the given cube.
 	for face_idx,face in enumerate(cube.faces):
 		# Count the number of correctly coloured squares.
-		num_correct = np.sum(face.flatten() == face_idx)
-		total_correct += num_correct
-		reward += num_correct
+		num_correct_colours = np.sum(face.flatten() == face_idx)
+		total_correct += num_correct_colours
+		reward += num_correct_colours
 
-		if num_correct == edge_length * edge_length:
+		if num_correct_colours == edge_length * edge_length:
 			# All squares are the correct colour.
 			reward += 2 * (edge_length - 1)
-		elif num_correct >= edge_length * edge_length / 2:
+		elif num_correct_colours >= edge_length * edge_length / 2:
 			# Half of the squares are the correct colour.
 			reward += 1 * (edge_length - 1)
 
-		# Rewards for corners and edges of the correct colour, if the cube is 3x3x3 or larger.
-		if cube.edge_length >= 3:
-			num_correct_corners = 0
-			if face[0, 0] == face_idx:
-				num_correct_corners += 1
-			if face[0, -1] == face_idx:
-				num_correct_corners += 1
-			if face[-1, 0] == face_idx:
-				num_correct_corners += 1
-			if face[-1, -1] == face_idx:
-				num_correct_corners += 1
+		num_correct_corners = check_corners(cube.faces, face_idx)
+		if num_correct_corners == 4:
+			# Reward more if all corners of a face are correct.
+			reward += 2
+		total_correct_corners += num_correct_corners
 
-			reward += 2 * num_correct_corners
-			if num_correct_corners == 4:
-				# Reward more if all corners of a face are the correct colour.
-				reward += num_correct_corners + 2
-
-			# Rewards for each row of the correct colour.
-			rows_correct = np.sum(np.sum(face == face_idx, axis=1) == edge_length)
-			reward += rows_correct * (edge_length - 1)
-
-			# Rewards for each column of the correct colour.
-			cols_correct = np.sum(np.sum(face.transpose() == face_idx, axis=1) == edge_length)
-			reward += cols_correct * (edge_length - 1)
-
+	reward += (total_correct_corners / 3) * edge_length
 	return total_correct, reward
+
+
+def check_corners(faces, face_idx):
+	""" Returns the number of corners of a face that are correct for all 3 of their sides. """
+	num_correct_corners = 0
+
+	# Face above.
+	u_face_colour = face_relations['_'.join([str(face_idx), 'u'])]
+	u_face = faces[u_face_colour]
+
+	# Face to the left.
+	l_face_colour = face_relations['_'.join([str(face_idx), 'l'])]
+	l_face = faces[l_face_colour]
+
+	# Face below.
+	d_face_colour = face_relations['_'.join([str(face_idx), 'd'])]
+	d_face = faces[d_face_colour]
+
+	# Face to the right.
+	r_face_colour = face_relations['_'.join([str(face_idx), 'r'])]
+	r_face = faces[r_face_colour]
+
+	if face_idx == 0:
+		# Top-left
+		if faces[face_idx, 0, 0] == face_idx:
+			l_face_corner = l_face[0, -1]
+			if l_face_corner == l_face_colour:
+				u_face_corner = u_face[-1, 0]
+				if u_face_corner == u_face_colour:
+					num_correct_corners += 1
+
+		# Top-right
+		if faces[face_idx, 0, -1] == face_idx:
+			r_face_corner = r_face[0, 0]
+			if r_face_corner == r_face_colour:
+				u_face_corner = u_face[-1, -1]
+				if u_face_corner == u_face_colour:
+					num_correct_corners += 1
+
+		# Bottom-left
+		if faces[face_idx, -1, 0] == face_idx:
+			l_face_corner = l_face[-1, -1]
+			if l_face_corner == l_face_colour:
+				d_face_corner = d_face[0, 0]
+				if d_face_corner == d_face_colour:
+					num_correct_corners += 1
+
+		# Bottom-right
+		if faces[face_idx, -1, -1] == face_idx:
+			r_face_corner = r_face[-1, 0]
+			if r_face_corner == r_face_colour:
+				d_face_corner = d_face[0, -1]
+				if d_face_corner == d_face_colour:
+					num_correct_corners += 1
+
+	if face_idx == 1:
+		# Top-left
+		if faces[face_idx, 0, 0] == face_idx:
+			l_face_corner = l_face[0, 0]
+			if l_face_corner == l_face_colour:
+				u_face_corner = u_face[0, -1]
+				if u_face_corner == u_face_colour:
+					num_correct_corners += 1
+
+		# Top-right
+		if faces[face_idx, 0, -1] == face_idx:
+			r_face_corner = r_face[0, -1]
+			if r_face_corner == r_face_colour:
+				u_face_corner = u_face[0, 0]
+				if u_face_corner == u_face_colour:
+					num_correct_corners += 1
+
+		# Bottom-left
+		if faces[face_idx, -1, 0] == face_idx:
+			l_face_corner = l_face[0, -1]
+			if l_face_corner == l_face_colour:
+				d_face_corner = d_face[0, 0]
+				if d_face_corner == d_face_colour:
+					num_correct_corners += 1
+
+		# Bottom-right
+		if faces[face_idx, -1, -1] == face_idx:
+			r_face_corner = r_face[0, 0]
+			if r_face_corner == r_face_colour:
+				d_face_corner = d_face[0, -1]
+				if d_face_corner == d_face_colour:
+					num_correct_corners += 1
+
+	if face_idx == 2:
+		# Top-left
+		if faces[face_idx, 0, 0] == face_idx:
+			l_face_corner = l_face[0, -1]
+			if l_face_corner == l_face_colour:
+				u_face_corner = u_face[0, 0]
+				if u_face_corner == u_face_colour:
+					num_correct_corners += 1
+
+		# Top-right
+		if faces[face_idx, 0, -1] == face_idx:
+			r_face_corner = r_face[0, 0]
+			if r_face_corner == r_face_colour:
+				u_face_corner = u_face[-1, 0]
+				if u_face_corner == u_face_colour:
+					num_correct_corners += 1
+
+		# Bottom-left
+		if faces[face_idx, -1, 0] == face_idx:
+			l_face_corner = l_face[-1, -1]
+			if l_face_corner == l_face_colour:
+				d_face_corner = d_face[-1, 0]
+				if d_face_corner == d_face_colour:
+					num_correct_corners += 1
+
+		# Bottom-right
+		if faces[face_idx, -1, -1] == face_idx:
+			r_face_corner = r_face[-1, 0]
+			if r_face_corner == r_face_colour:
+				d_face_corner = d_face[0, 0]
+				if d_face_corner == d_face_colour:
+					num_correct_corners += 1
+
+	if face_idx == 3:
+		# Top-left
+		if faces[face_idx, 0, 0] == face_idx:
+			l_face_corner = l_face[-1, -1]
+			if l_face_corner == l_face_colour:
+				u_face_corner = u_face[-1, 0]
+				if u_face_corner == u_face_colour:
+					num_correct_corners += 1
+
+		# Top-right
+		if faces[face_idx, 0, -1] == face_idx:
+			r_face_corner = r_face[-1, 0]
+			if r_face_corner == r_face_colour:
+				u_face_corner = u_face[-1, -1]
+				if u_face_corner == u_face_colour:
+					num_correct_corners += 1
+
+		# Bottom-left
+		if faces[face_idx, -1, 0] == face_idx:
+			l_face_corner = l_face[-1, 0]
+			if l_face_corner == l_face_colour:
+				d_face_corner = d_face[-1, -1]
+				if d_face_corner == d_face_colour:
+					num_correct_corners += 1
+
+		# Bottom-right
+		if faces[face_idx, -1, -1] == face_idx:
+			r_face_corner = r_face[-1, -1]
+			if r_face_corner == r_face_colour:
+				d_face_corner = d_face[-1, 0]
+				if d_face_corner == d_face_colour:
+					num_correct_corners += 1
+
+	if face_idx == 4:
+		# Top-left
+		if faces[face_idx, 0, 0] == face_idx:
+			l_face_corner = l_face[0, -1]
+			if l_face_corner == l_face_colour:
+				u_face_corner = u_face[-1, -1]
+				if u_face_corner == u_face_colour:
+					num_correct_corners += 1
+
+		# Top-right
+		if faces[face_idx, 0, -1] == face_idx:
+			r_face_corner = r_face[0, 0]
+			if r_face_corner == r_face_colour:
+				u_face_corner = u_face[0, -1]
+				if u_face_corner == u_face_colour:
+					num_correct_corners += 1
+
+		# Bottom-left
+		if faces[face_idx, -1, 0] == face_idx:
+			l_face_corner = l_face[-1, -1]
+			if l_face_corner == l_face_colour:
+				d_face_corner = d_face[0, -1]
+				if d_face_corner == d_face_colour:
+					num_correct_corners += 1
+
+		# Bottom-right
+		if faces[face_idx, -1, -1] == face_idx:
+			r_face_corner = r_face[-1, 0]
+			if r_face_corner == r_face_colour:
+				d_face_corner = d_face[-1, -1]
+				if d_face_corner == d_face_colour:
+					num_correct_corners += 1
+
+	if face_idx == 5:
+		# Top-left
+		if faces[face_idx, 0, 0] == face_idx:
+			l_face_corner = l_face[0, -1]
+			if l_face_corner == l_face_colour:
+				u_face_corner = u_face[0, -1]
+				if u_face_corner == u_face_colour:
+					num_correct_corners += 1
+
+		# Top-right
+		if faces[face_idx, 0, -1] == face_idx:
+			r_face_corner = r_face[0, 0]
+			if r_face_corner == r_face_colour:
+				u_face_corner = u_face[0, 0]
+				if u_face_corner == u_face_colour:
+					num_correct_corners += 1
+
+		# Bottom-left
+		if faces[face_idx, -1, 0] == face_idx:
+			l_face_corner = l_face[-1, -1]
+			if l_face_corner == l_face_colour:
+				d_face_corner = d_face[-1, -1]
+				if d_face_corner == d_face_colour:
+					num_correct_corners += 1
+
+		# Bottom-right
+		if faces[face_idx, -1, -1] == face_idx:
+			r_face_corner = r_face[-1, 0]
+			if r_face_corner == r_face_colour:
+				d_face_corner = d_face[-1, 0]
+				if d_face_corner == d_face_colour:
+					num_correct_corners += 1
+
+	return num_correct_corners
 
 
 def show_statistics(
