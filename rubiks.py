@@ -1,5 +1,8 @@
 import numpy as np
+import math
 import random
+import time
+import copy
 
 # Number of squares along each edge of the Cube.
 edge_length = 3
@@ -70,13 +73,13 @@ class Cube():
 		self.edge_length = edge_length
 		self.faces = np.zeros([6,self.edge_length,self.edge_length], dtype=np.int32)
 
-		# rotate_cw_take_map specifies how to rearrange a face upon clockwise rotation.
-		rotate_cw_take_map = np.arange(self.edge_length * self.edge_length)
-		rotate_cw_take_map = rotate_cw_take_map.reshape(self.edge_length, self.edge_length)
-		self.rotate_cw_take_map = np.flip(rotate_cw_take_map.transpose(), axis=[1])
+		# cw_rotate_take_inds specifies how to rearrange a face upon clockwise rotation.
+		cw_rotate_take_inds = np.arange(self.edge_length * self.edge_length)
+		cw_rotate_take_inds = cw_rotate_take_inds.reshape(self.edge_length, self.edge_length)
+		self.cw_rotate_take_inds = np.flip(cw_rotate_take_inds.transpose(), axis=[1])
 
+		# Init each face with a single colour.
 		for face_idx in range(self.faces.shape[0]):
-			# Init each face with a single colour.
 			self.faces[face_idx].fill(face_idx)
 
 
@@ -88,12 +91,12 @@ class Cube():
 		if clockwise:
 			self.faces[face] = np.take(
 				a=self.faces[face],
-				indices=self.rotate_cw_take_map).reshape(self.edge_length, self.edge_length)
+				indices=self.cw_rotate_take_inds).reshape(self.edge_length, self.edge_length)
 		else:
 			self.faces[face] = np.take(
 				a=self.faces[face],
 				indices=np.flip(
-					self.rotate_cw_take_map.flatten(),
+					self.cw_rotate_take_inds.flatten(),
 					axis=[0])).reshape(self.edge_length, self.edge_length)
 
 
@@ -145,14 +148,14 @@ class Cube():
 
 		elif face == 2:
 			if clockwise:
-				u_face.transpose()[0] = l_face_copy.transpose()[-1]
-				l_face.transpose()[-1] = d_face_copy.transpose()[0]
-				d_face.transpose()[0] = np.flip(r_face_copy.transpose()[0], axis=[0])
+				u_face.transpose()[0] = np.flip(l_face_copy.transpose()[-1], axis=[0])
+				l_face.transpose()[-1] = np.flip(d_face_copy.transpose()[0], axis=[0])
+				d_face.transpose()[0] = r_face_copy.transpose()[0]
 				r_face.transpose()[0] = u_face_copy.transpose()[0]
 			else:
-				u_face.transpose()[0] = np.flip(r_face_copy.transpose()[0], axis=[0])
-				l_face.transpose()[-1] = u_face_copy.transpose()[0]
-				d_face.transpose()[0] = l_face_copy.transpose()[-1]
+				u_face.transpose()[0] = r_face_copy.transpose()[0]
+				l_face.transpose()[-1] = np.flip(u_face_copy.transpose()[0], axis=[0])
+				d_face.transpose()[0] = np.flip(l_face_copy.transpose()[-1], axis=[0])
 				r_face.transpose()[0] = d_face_copy.transpose()[0]
 		
 		elif face == 3:
@@ -171,25 +174,25 @@ class Cube():
 			if clockwise:
 				u_face.transpose()[-1] = l_face_copy.transpose()[-1]
 				l_face.transpose()[-1] = d_face_copy.transpose()[-1]
-				d_face.transpose()[-1] = r_face_copy.transpose()[0]
-				r_face.transpose()[0] = u_face_copy.transpose()[-1]
+				d_face.transpose()[-1] = np.flip(r_face_copy.transpose()[0], axis=[0])
+				r_face.transpose()[0] = np.flip(u_face_copy.transpose()[-1], axis=[0])
 			else:
-				u_face.transpose()[-1] = r_face_copy.transpose()[0]
+				u_face.transpose()[-1] = np.flip(r_face_copy.transpose()[0], axis=[0])
 				l_face.transpose()[-1] = u_face_copy.transpose()[-1]
 				d_face.transpose()[-1] = l_face_copy.transpose()[-1]
-				r_face.transpose()[0] = d_face_copy.transpose()[-1]
+				r_face.transpose()[0] = np.flip(d_face_copy.transpose()[-1], axis=[0])
 
 		elif face == 5:
 			if clockwise:
-				u_face[0] = np.flip(l_face_copy.transpose()[-1], axis=[0])
+				u_face[0] = l_face_copy.transpose()[-1]
 				l_face.transpose()[-1] = np.flip(d_face_copy[-1], axis=[0])
-				d_face[-1] = np.flip(r_face_copy.transpose()[0], axis=[0])
+				d_face[-1] = r_face_copy.transpose()[0]
 				r_face.transpose()[0] = np.flip(u_face_copy[0], axis=[0])
 			else:
 				u_face[0] = np.flip(r_face_copy.transpose()[0], axis=[0])
-				l_face.transpose()[-1] = np.flip(u_face_copy[0], axis=[0])
+				l_face.transpose()[-1] = u_face_copy[0]
 				d_face[-1] = np.flip(l_face_copy.transpose()[-1], axis=[0])
-				r_face.transpose()[0] = np.flip(d_face_copy[-1], axis=[0])
+				r_face.transpose()[0] = d_face_copy[-1]
 				
 
 	def rotate(self, face, clockwise=True):
@@ -198,7 +201,7 @@ class Cube():
 		self.rotate_sides(face, clockwise)
 
 
-	def scramble(self, iterations):
+	def scramble(self, iterations=scramble_iterations):
 		""" Rotate the cube's faces randomly the specified number of times (iterations). """
 		face_numbers = range(6)
 		for i in range(iterations):
@@ -207,8 +210,30 @@ class Cube():
 			self.rotate(face=face, clockwise=rotation)
 
 
+	def copy(self):
+		""" Create a copy of the cube. """
+		clone_cube = Cube(self.edge_length)
+		clone_cube.faces = self.faces.copy()
+		return clone_cube
+
+
+	def take_action(self, face, clockwise=True):
+		""" Take the specified rotation action. """
+		self.rotate(face=face, clockwise=clockwise)
+
+
+	def take_random_action(self):
+		""" Take a random rotation action. """
+		face = random.choice(range(6))
+		rotation = bool(random.getrandbits(1))
+		self.rotate(face=face, clockwise=rotation)
+		return (face, rotation)
+
+
 	def __repr__(self):
 		""" Returns a coloured grid of the flattened cube. """
+		edge_length = self.edge_length
+
 		red_face = self.faces[colours['red']]
 		white_face = self.faces[colours['white']]
 		green_face = self.faces[colours['green']]
@@ -265,6 +290,10 @@ class Cube():
 		return cube_str
 
 
+	def __eq__(self, other):
+		return np.array_equal(self.faces, other.faces)
+
+
 def main():
 	cube = Cube(edge_length=edge_length)
 	print('Original cube:')
@@ -274,6 +303,7 @@ def main():
 	cube.scramble(iterations=scramble_iterations)
 	print('Scrambled cube:')
 	print(cube)
+
 
 if __name__ == '__main__':
 	main()
