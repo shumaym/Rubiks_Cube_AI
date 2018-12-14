@@ -2,7 +2,6 @@ import numpy as np
 import math
 import random
 import time
-import copy
 
 # Number of squares along each edge of the Cube.
 edge_length = 3
@@ -201,17 +200,14 @@ class Cube():
 
 	def scramble(self, iterations=scramble_iterations):
 		""" Rotate the cube's faces randomly the specified number of times (iterations). """
-		face_numbers = range(6)
 		for i in range(iterations):
-			face = random.choice(face_numbers)
-			rotation = bool(random.getrandbits(1))
-			self.rotate(face=face, clockwise=rotation)
+			self.take_random_action()
 
 
 	def copy(self):
 		""" Create a copy of the cube. """
 		clone_cube = Cube(self.edge_length)
-		clone_cube.faces = self.faces.copy()
+		clone_cube.faces = np.copy(self.faces)
 		return clone_cube
 
 

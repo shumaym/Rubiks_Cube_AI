@@ -22,10 +22,13 @@ Performance
 -----
 Due to the complexity of the puzzle and the simplicity of the AI, it's unlikely to solve large cubes as of yet; regardless, the AI fares substantially better than if random choices were taken.
 Random choice gives a short-term average of ```4``` correct colours for a 2x2x2 cube, and ```14``` for a 3x3x3 cube.
-This AI may sustain an average of ```15+``` and ```29+``` correct colours respectively within a few minutes of learning.
+The AI may sustain an average of ```15+``` and ```29+``` correct colours respectively within a few minutes of learning.
 Note that these numbers are only taking into account the colour of individual squares, not the correctness of entire blocks.
 
-Below are the best solutions found between the AI and random choice, each allowed up to 600,000 rotations (15 minutes).
+The AI's performance is currently affected by local maxima, possibly stagnating when close to solutions.
+This is mediated by a high base rate of randomness, although a better solution will be attempted in the near future.
+
+Below are the best solutions found between the AI and random choice, each allowed up to 600,000 rotations (4 minutes).
 The AI is not trained on previous cubes before this benchmark.
 2x2x2 cubes are usually solved within 100,000 rotations.
 
@@ -42,7 +45,6 @@ The AI is not trained on previous cubes before this benchmark.
 		</p>
 	</figure>
 </div>
-<br>
 <div align="center">
 	<figure>
 		<img src="docs/2xCube_AI_24Correct.png" width="200" hspace="5">
@@ -52,6 +54,15 @@ The AI is not trained on previous cubes before this benchmark.
 		<img src="docs/2xCube_Random_20Correct.png" width="200" hspace="5">
 		<p align="middle">
 			<figcaption>Random: 20 Correct</figcaption>
+		</p>
+	</figure>
+</div>
+<br>
+<div align="center">
+	<figure>
+		<img src="docs/2xCube_AI_SolStats.png" hspace="5">
+		<p align="middle">
+			<figcaption>AI: 2x2x2 Cube Solution Stats</figcaption>
 		</p>
 	</figure>
 </div>

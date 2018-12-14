@@ -11,7 +11,7 @@ import signal
 from rubiks import Cube, face_relations
 
 # Number of squares along each edge of the Cube.
-edge_length = 3
+edge_length = 2
 
 # If True, attempts to learn through reinforcement learning.
 # Otherwise, random actions are taken.
@@ -39,7 +39,7 @@ Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'
 BATCH_SIZE = 512
 GAMMA = 0.999
 EPS_START = 0.975
-EPS_END = 0.05
+EPS_END = 0.1
 EPS_DECAY = 50000
 TARGET_UPDATE = BATCH_SIZE * 100
 MEMORY_SIZE = 10000
@@ -53,8 +53,10 @@ def exit_gracefully(signum, frame):
 	"""
 	global flag_continue_attempt
 	global flag_continue_main
+	global time_start
 	signal.signal(signal.SIGINT, original_sigint)
 	try:
+		time_paused = time.time()
 		print()
 		if len(solved_stats) > 0:
 			show_solved_stats()
@@ -63,6 +65,7 @@ def exit_gracefully(signum, frame):
 			print('Exiting.')
 			flag_continue_main = False
 			flag_continue_attempt = False
+		time_start += time.time() - time_paused
 	except KeyboardInterrupt:
 		print('\nExiting.')
 		flag_continue_main = False
@@ -92,7 +95,7 @@ class NN(nn.Module):
 			self.lin2 = nn.Linear(num_squares, 24)
 			self.lin3 = nn.Linear(24, num_outputs)
 		else:
-			print('Invalid number of layers! (Choose 1 -> 3)')
+			print('Error: Invalid number of layers! (Choose 1 -> 3)')
 			quit()
 
 	def forward(self, x):
@@ -146,8 +149,7 @@ def select_action(state):
 		with torch.no_grad():
 			return np.argmax(policy_net(state)).view(1)
 	else:
-		return torch.tensor(random.randrange(6 * 2), dtype=torch.long).view(1)
-
+		return torch.randint(low=0, high=6*2, size=(1,), dtype=torch.long)
 
 def optimize_model():
 	""" Update the model. """
@@ -455,8 +457,8 @@ def show_solved_stats():
 	print()
 	print('Solved statistics:')
 	for idx,stat in enumerate(solved_stats):
-		print('Cube {0:3}: Iterations:\t{1}, Time:\t{2:6}, Seed:\t{3}'.format(
-			idx, stat[0], int(stat[1]), stat[2]))
+		print('Cube {0:>3} (Attempt {1:>3}): Iterations:\t{2:>7}, Time:\t{3:>5}, Seed:\t{4:>10}'.format(
+			idx, stat[0], stat[1], int(stat[2]), stat[3]))
 	print()
 
 
@@ -473,6 +475,8 @@ def solution_attempt():
 	Depending on flag_deliberate_attempt, may use an AI to learn,
 	otherwise will take random actions.
 	"""
+	global attempt_num
+	global time_start
 	global flag_continue_attempt
 	# Dictates continuation of each attempt.
 	flag_continue_attempt = True
@@ -494,7 +498,6 @@ def solution_attempt():
 	running_stats_length = 1000
 	running_num_correct = [0] * running_stats_length
 	running_reward = [0] * running_stats_length
-
 
 	if flag_deliberate_attempt:
 		# Used to translate the cube's state into boolean values.
@@ -529,7 +532,7 @@ def solution_attempt():
 
 		if num_correct == num_squares:
 			print('\n\nSolved!')
-			solved_stats.append([iteration, time.time() - time_start, attempt_seeds[-1]])
+			solved_stats.append([attempt_num, iteration, time.time() - time_start, attempt_seeds[-1]])
 			break
 
 		if reward > max_reward:
@@ -545,7 +548,7 @@ def solution_attempt():
 			state = next_state
 
 			if iteration % BATCH_SIZE == 0:
-				# Perform one step of the optimization (on the target network)
+				# Perform one step of the optimization.
 				optimize_model()
 
 			if iteration % TARGET_UPDATE == 0:
@@ -556,7 +559,7 @@ def solution_attempt():
 			show_stats(
 				cube, running_stats_length, num_correct, running_num_correct, max_correct,
 				reward, running_reward, max_reward, iteration, time_start)
-
+		
 		iteration += 1
 
 		# If set, discards the current cube and creates a new one at term_iter iteration.
@@ -579,19 +582,29 @@ def solution_attempt():
 
 
 def main():
-	global flag_continue_main
 	# Dictates continuation of main loop.
+	global flag_continue_main
 	flag_continue_main = True
 
+	global attempt_num
 	attempt_num = 0
+
+	last_random_state = random.getstate()
+
 	while flag_continue_main:
-		# Set the seed.
+		# Set the RNG seed.
 		if attempt_num == 0 and root_seed != None:
 			attempt_seed = root_seed
+			random.seed(root_seed)
 		else:
+			random.setstate(last_random_state)
+			random.seed(random.randint(0, 2 ** 30))
 			attempt_seed = random.randint(0, 2 ** 30)
+
+		last_random_state = random.getstate()
 		attempt_seeds.append(attempt_seed)
-		random.seed(attempt_seed)
+
+		# Setting PyTorch's RNG seed doesn't seem to affect the results.
 		torch.manual_seed(attempt_seed)
 
 		# Start a solution attempt on a new cube.
