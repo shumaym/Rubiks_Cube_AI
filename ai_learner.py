@@ -25,24 +25,24 @@ root_seed = None
 
 # Tracks used seeds and solution statistics.
 attempt_seeds = []
-solved_statistics = []
+solved_stats = []
 
 # If True, discards the current Cube and creates a new one to solve.
-flag_termination_point = False
-# Iteration at which to create a new Cube, if flag_termination_point == True.
-termination_iteration = 100000
+flag_term_point = True
+# Iteration at which to create a new Cube, if flag_term_point == True.
+term_iter = 500000
 
 # Used in ReplayMemory class.
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
 
 # Parameters specific to the AI.
-BATCH_SIZE = 16
+BATCH_SIZE = 512
 GAMMA = 0.999
 EPS_START = 0.975
-EPS_END = 0.025
+EPS_END = 0.05
 EPS_DECAY = 50000
-TARGET_UPDATE = 1000
-MEMORY_SIZE = 5000
+TARGET_UPDATE = BATCH_SIZE * 100
+MEMORY_SIZE = 10000
 total_iterations = 0
 
 
@@ -55,7 +55,10 @@ def exit_gracefully(signum, frame):
 	global flag_continue_main
 	signal.signal(signal.SIGINT, original_sigint)
 	try:
-		input_text = input('\n\nReally Quit? (y/n)> ').lower().lstrip()
+		print()
+		if len(solved_stats) > 0:
+			show_solved_stats()
+		input_text = input('\nReally Quit? (y/n)> ').lower().lstrip()
 		if input_text != '' and input_text[0] == 'y':
 			print('Exiting.')
 			flag_continue_main = False
@@ -206,7 +209,7 @@ def reward_function(cube):
 
 	reward += (total_correct_corners / 3) * edge_length
 	# Increase disparity between top solutions
-	reward **= 1.25
+	reward **= 1.5
 	return total_correct, reward
 
 
@@ -431,7 +434,7 @@ def check_corners(faces, face_idx):
 	return num_correct_corners
 
 
-def show_statistics(
+def show_stats(
 		cube, running_stats_length, num_correct, running_num_correct, max_correct,
 		reward, running_reward, max_reward, iteration, time_start):
 	""" Format and display the provided cube and statistics. """
@@ -447,12 +450,12 @@ def show_statistics(
 	print('Current Time: {0} seconds'.format(int(time.time() - time_start)))
 
 
-def show_solved_statistics():
+def show_solved_stats():
 	""" Show the statistics of past solutions. """
 	print()
 	print('Solved statistics:')
-	for idx,stat in enumerate(solved_statistics):
-		print('Cube {0}: Iterations: {1}, Time: {2}, Seed: {3}'.format(
+	for idx,stat in enumerate(solved_stats):
+		print('Cube {0:3}: Iterations:\t{1}, Time:\t{2:6}, Seed:\t{3}'.format(
 			idx, stat[0], int(stat[1]), stat[2]))
 	print()
 
@@ -492,11 +495,12 @@ def solution_attempt():
 	running_num_correct = [0] * running_stats_length
 	running_reward = [0] * running_stats_length
 
-	# Used to translate the cube's state into boolean values.
 
 	if flag_deliberate_attempt:
-		# Gather the cube's current state.
+		# Used to translate the cube's state into boolean values.
 		state_grid = torch.arange(start=0, end=num_states, step=6, dtype=torch.int64)
+
+		# Gather the cube's current state.
 		squares = torch.as_tensor(cube.faces.flatten(), dtype=torch.int64)
 		state = torch.zeros([num_states], dtype=torch.float32)
 		state[state_grid + squares] = 1
@@ -525,7 +529,7 @@ def solution_attempt():
 
 		if num_correct == num_squares:
 			print('\n\nSolved!')
-			solved_statistics.append([iteration, time.time() - time_start, attempt_seeds[-1]])
+			solved_stats.append([iteration, time.time() - time_start, attempt_seeds[-1]])
 			break
 
 		if reward > max_reward:
@@ -540,23 +544,25 @@ def solution_attempt():
 			memory.push(state, action, next_state, reward)
 			state = next_state
 
-			# Perform one step of the optimization (on the target network)
-			optimize_model()
+			if iteration % BATCH_SIZE == 0:
+				# Perform one step of the optimization (on the target network)
+				optimize_model()
 
-			# Update the target network.
 			if iteration % TARGET_UPDATE == 0:
+				# Update the target network.
 				target_net.load_state_dict(policy_net.state_dict())
 
 		if iteration % 1000 == 0:
-			show_statistics(
+			show_stats(
 				cube, running_stats_length, num_correct, running_num_correct, max_correct,
 				reward, running_reward, max_reward, iteration, time_start)
 
 		iteration += 1
-		
-		# If set, discards the current cube and create a new one.
-		if flag_termination_point and iteration % termination_iteration == 0:
-			print('\n\nCreating a new cube.')
+
+		# If set, discards the current cube and creates a new one at term_iter iteration.
+		if flag_term_point and iteration % term_iter == 0:
+			print('\n\nTermination point reached.')
+			print('Creating a new cube.')
 			cube = Cube(edge_length=edge_length)
 			print('Scrambling...')
 			cube.scramble()
@@ -567,8 +573,8 @@ def solution_attempt():
 			time_start = time.time()
 			running_num_correct = [0] * running_stats_length
 
-	if len(solved_statistics) > 0:
-		show_solved_statistics()
+	if len(solved_stats) > 0:
+		show_solved_stats()
 	show_best_cube_statistics(best_cube, max_correct)
 
 

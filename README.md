@@ -7,7 +7,6 @@ No algorithms specific to solving Rubik's Cubes are in place, so the AI learns s
 Currently, only the rotation of faces is supported, so cubes larger than 3x3x3 cannot be fully manipulated.
 
 ```ai_learner.py``` attempts to solve a Rubik's Cube strictly through reinforcement learning, using a simple Neural Network.
-The AI learns slowly at first as more emphasis is placed on not overfitting, rather than learning quickly.
 Simple heuristics are in place to reward the AI; primarily, it is concerned with the number of correct colours on each face of the cube.
 Extra points are given if corner blocks are correct for all of their adjacent sides.
 Checks for entirely-correct edge blocks is not yet in place.
@@ -23,7 +22,7 @@ Performance
 -----
 Due to the complexity of the puzzle and the simplicity of the AI, it's unlikely to solve large cubes as of yet; regardless, the AI fares substantially better than if random choices were taken.
 Random choice gives a short-term average of ```4``` correct colours for a 2x2x2 cube, and ```14``` for a 3x3x3 cube.
-This AI may sustain an average of ```15+``` and ```28+``` correct colours respectively within a few minutes of learning.
+This AI may sustain an average of ```15+``` and ```29+``` correct colours respectively within a few minutes of learning.
 Note that these numbers are only taking into account the colour of individual squares, not the correctness of entire blocks.
 
 Below are the best solutions found between the AI and random choice, each allowed up to 600,000 rotations (15 minutes).

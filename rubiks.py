@@ -13,7 +13,7 @@ text_colour_white  = '\033[0m'
 # Number of random rotations to make during a Cube's scrambling.
 scramble_iterations = 100000
 
-# Colours of Rubik's Cube.
+# Colours of the Rubik's Cube.
 colours = {
 	'red': 0,
 	'white': 1,
@@ -89,21 +89,19 @@ class Cube():
 		Sides are not accounted for.
 		"""
 		if clockwise:
-			self.faces[face] = np.take(
-				a=self.faces[face],
-				indices=self.cw_rotate_take_inds).reshape(self.edge_length, self.edge_length)
+			indices = self.cw_rotate_take_inds
 		else:
-			self.faces[face] = np.take(
-				a=self.faces[face],
-				indices=np.flip(
-					self.cw_rotate_take_inds.flatten(),
-					axis=[0])).reshape(self.edge_length, self.edge_length)
+			indices = np.flip(self.cw_rotate_take_inds.flatten(),axis=[0])
+
+		self.faces[face] = np.take(
+			a=self.faces[face],
+			indices=indices).reshape(self.edge_length, self.edge_length)
 
 
 	def rotate_sides(self, face, clockwise=True):
 		"""
 		Rotate the sides of a face 90 degrees in the given direction.
-		Rotated face is not accounted for.
+		Face is not accounted for.
 		"""
 		# Gather information on the face above the rotating face.
 		u_face = self.faces[face_relations['_'.join([str(face), 'u'])]]
