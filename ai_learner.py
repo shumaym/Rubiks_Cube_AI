@@ -17,19 +17,34 @@ edge_length = 3
 # Otherwise, random actions are taken.
 flag_deliberate_attempt = True
 
-# Whether to use multiple layers in the NN.
-flag_multiple_layers = True
+# Number of layers to use in the NN.
+num_layers = 2
 
-# Starting seed for python's and PyTorch's random.
-# If != None, will be used.
+# Starting attempt's random seed. Will be used if != None.
 root_seed = None
 
 # Tracks used seeds and solution statistics.
 attempt_seeds = []
 solved_statistics = []
 
+# If True, discards the current Cube and creates a new one to solve.
+flag_termination_point = False
+# Iteration at which to create a new Cube, if flag_termination_point == True.
+termination_iteration = 100000
+
 # Used in ReplayMemory class.
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
+
+# Parameters specific to the AI.
+BATCH_SIZE = 16
+GAMMA = 0.999
+EPS_START = 0.975
+EPS_END = 0.025
+EPS_DECAY = 50000
+TARGET_UPDATE = 1000
+MEMORY_SIZE = 5000
+total_iterations = 0
+
 
 def exit_gracefully(signum, frame):
 	"""
@@ -61,25 +76,34 @@ class NN(nn.Module):
 	def __init__(self):
 		super(NN, self).__init__()
 		num_squares = 6 * edge_length * edge_length
+		num_states = num_squares * 6
 		num_outputs = 6 * 2
-		if flag_multiple_layers:
-			self.lin1 = nn.Linear(num_squares, 24)
+
+		if num_layers == 1:
+			self.lin1 = nn.Linear(num_states, num_outputs)
+		elif num_layers == 2:
+			self.lin1 = nn.Linear(num_states, 24)
 			self.lin2 = nn.Linear(24, num_outputs)
+		elif num_layers == 3:
+			self.lin1 = nn.Linear(num_states, num_squares)
+			self.lin2 = nn.Linear(num_squares, 24)
+			self.lin3 = nn.Linear(24, num_outputs)
 		else:
-			self.head = nn.Linear(num_squares, num_outputs)
+			print('Invalid number of layers! (Choose 1 -> 3)')
+			quit()
 
 	def forward(self, x):
-		# x = F.selu(x)
-		if flag_multiple_layers:
-			x = self.lin1(x.view(-1, x.size(0)))
+		if num_layers >= 1:
+			x = self.lin1(x)
+		if num_layers >= 2:
 			x = self.lin2(x)
-			return x
-		else:
-			return self.head(x.view(-1, x.size(0)))
+		if num_layers >= 3:
+			x = self.lin3(x)
+		return x
 
 
 class ReplayMemory(object):
-	""" Memory of past state transitions and their associated reward deltas. """
+	""" Memory of past state transitions and their associated rewards. """
 	def __init__(self, capacity):
 		self.capacity = capacity
 		self.memory = []
@@ -99,30 +123,22 @@ class ReplayMemory(object):
 		return len(self.memory)
 
 
-# Parameters specific to the AI.
-BATCH_SIZE = 8
-GAMMA = 0.999
-EPS_START = 0.9
-EPS_END = 0.025
-EPS_DECAY = 200
-TARGET_UPDATE = 2500
-
+# Creation of NNs and related objects.
 policy_net = NN()
 target_net = NN()
 target_net.load_state_dict(policy_net.state_dict())
 target_net.eval()
 optimizer = optim.RMSprop(policy_net.parameters())
-memory = ReplayMemory(2000)
-steps_done = 0
+memory = ReplayMemory(MEMORY_SIZE)
 
 
 def select_action(state):
 	""" Generate an action, depending on the current state. """
-	global steps_done
+	global total_iterations
 	sample = random.random()
 	eps_threshold = EPS_END + (EPS_START - EPS_END) * \
-		math.exp(-1. * steps_done / EPS_DECAY)
-	steps_done += 1
+		math.exp(-1. * total_iterations / EPS_DECAY)
+	total_iterations += 1
 	if sample > eps_threshold:
 		with torch.no_grad():
 			return np.argmax(policy_net(state)).view(1)
@@ -137,7 +153,7 @@ def optimize_model():
 	transitions = memory.sample(BATCH_SIZE)
 	batch = Transition(*zip(*transitions))
 
-	state_batch = torch.cat(batch.state).reshape(6 * edge_length * edge_length, -1)
+	state_batch = torch.cat(batch.state).reshape(-1, 6 * 6 * edge_length * edge_length)
 	action_batch = torch.cat(batch.action)
 	reward_batch = torch.cat(batch.reward)
 
@@ -185,10 +201,12 @@ def reward_function(cube):
 		num_correct_corners = check_corners(cube.faces, face_idx)
 		if num_correct_corners == 4:
 			# Reward more if all corners of a face are correct.
-			reward += 2
+			reward += 1
 		total_correct_corners += num_correct_corners
 
 	reward += (total_correct_corners / 3) * edge_length
+	# Increase disparity between top solutions
+	reward **= 1.25
 	return total_correct, reward
 
 
@@ -245,7 +263,7 @@ def check_corners(faces, face_idx):
 				if d_face_corner == d_face_colour:
 					num_correct_corners += 1
 
-	if face_idx == 1:
+	elif face_idx == 1:
 		# Top-left
 		if faces[face_idx, 0, 0] == face_idx:
 			l_face_corner = l_face[0, 0]
@@ -278,7 +296,7 @@ def check_corners(faces, face_idx):
 				if d_face_corner == d_face_colour:
 					num_correct_corners += 1
 
-	if face_idx == 2:
+	elif face_idx == 2:
 		# Top-left
 		if faces[face_idx, 0, 0] == face_idx:
 			l_face_corner = l_face[0, -1]
@@ -311,7 +329,7 @@ def check_corners(faces, face_idx):
 				if d_face_corner == d_face_colour:
 					num_correct_corners += 1
 
-	if face_idx == 3:
+	elif face_idx == 3:
 		# Top-left
 		if faces[face_idx, 0, 0] == face_idx:
 			l_face_corner = l_face[-1, -1]
@@ -344,7 +362,7 @@ def check_corners(faces, face_idx):
 				if d_face_corner == d_face_colour:
 					num_correct_corners += 1
 
-	if face_idx == 4:
+	elif face_idx == 4:
 		# Top-left
 		if faces[face_idx, 0, 0] == face_idx:
 			l_face_corner = l_face[0, -1]
@@ -377,7 +395,7 @@ def check_corners(faces, face_idx):
 				if d_face_corner == d_face_colour:
 					num_correct_corners += 1
 
-	if face_idx == 5:
+	elif face_idx == 5:
 		# Top-left
 		if faces[face_idx, 0, 0] == face_idx:
 			l_face_corner = l_face[0, -1]
@@ -414,15 +432,17 @@ def check_corners(faces, face_idx):
 
 
 def show_statistics(
-		cube, num_correct, running_num_correct, running_stats_length, max_correct,
-		reward, max_reward, max_reward_iter, iteration, time_start):
+		cube, running_stats_length, num_correct, running_num_correct, max_correct,
+		reward, running_reward, max_reward, iteration, time_start):
 	""" Format and display the provided cube and statistics. """
 	print(cube)
-	print('Currently Correct: {0}'.format(int(num_correct)))
-	print('Running Correctness: {0:.3f}'.format(sum(running_num_correct)/running_stats_length))
-	print('Max Correct: {0}'.format(int(max_correct)))
-	print('Current Reward: {0}'.format(int(reward)))
-	print('Max Reward: {0} at iter {1}'.format(int(max_reward), int(max_reward_iter)))
+	print('Correct:     (Current: {0:3}, Running: {1:7.3f}, Max: {2:4})'.format(
+		int(num_correct), sum(running_num_correct)/running_stats_length, int(max_correct)))
+	print('Reward:      (Current: {0:3}, Running: {1:7.3f}, Max: {2:4})'.format(
+		int(reward), sum(running_reward)/running_stats_length, int(max_reward)))
+	randomness = EPS_END + (EPS_START - EPS_END) * \
+		math.exp(-1. * total_iterations / EPS_DECAY)
+	print('Randomness: {0:.2f}%'.format(100 * randomness))
 	print('Current Iter: {0}'.format(iteration))
 	print('Current Time: {0} seconds'.format(int(time.time() - time_start)))
 
@@ -430,6 +450,7 @@ def show_statistics(
 def show_solved_statistics():
 	""" Show the statistics of past solutions. """
 	print()
+	print('Solved statistics:')
 	for idx,stat in enumerate(solved_statistics):
 		print('Cube {0}: Iterations: {1}, Time: {2}, Seed: {3}'.format(
 			idx, stat[0], int(stat[1]), stat[2]))
@@ -450,11 +471,10 @@ def solution_attempt():
 	otherwise will take random actions.
 	"""
 	global flag_continue_attempt
-	# Dictates continuation each attempt.
+	# Dictates continuation of each attempt.
 	flag_continue_attempt = True
 
 	cube = Cube(edge_length=edge_length)
-	_, max_reward = reward_function(cube)
 	print('Original cube:')
 	print(cube)
 
@@ -462,20 +482,27 @@ def solution_attempt():
 	cube.scramble()
 	
 	num_squares = 6 * cube.edge_length * cube.edge_length
+	num_states = num_squares * 6
 	iteration = 0
 	max_correct = 0
 	best_cube = cube.copy()
 	max_reward = 0
 	time_start = time.time()
-	max_reward_iter = -1
 	running_stats_length = 1000
 	running_num_correct = [0] * running_stats_length
+	running_reward = [0] * running_stats_length
+
+	# Used to translate the cube's state into boolean values.
+
+	if flag_deliberate_attempt:
+		# Gather the cube's current state.
+		state_grid = torch.arange(start=0, end=num_states, step=6, dtype=torch.int64)
+		squares = torch.as_tensor(cube.faces.flatten(), dtype=torch.int64)
+		state = torch.zeros([num_states], dtype=torch.float32)
+		state[state_grid + squares] = 1
 
 	while flag_continue_attempt:
 		if flag_deliberate_attempt:
-			# Gather the cube's current state.
-			state = torch.as_tensor(cube.faces.flatten(), dtype=torch.float32)
-
 			# Select an action, depending on the current state.
 			action = select_action(state)
 			face = int(action / 2)
@@ -483,11 +510,14 @@ def solution_attempt():
 			# Take the action.
 			cube.take_action(face, rotation)
 		else:
+			# Take a random action.
 			cube.take_random_action()
 
 		# Compute the number of correctly-coloured squares and corresponding reward.
 		num_correct, reward = reward_function(cube)
 		running_num_correct[iteration % running_stats_length] = num_correct
+		running_reward[iteration % running_stats_length] = reward
+		reward = torch.as_tensor([reward])
 
 		if num_correct > max_correct:
 			max_correct = num_correct
@@ -498,31 +528,44 @@ def solution_attempt():
 			solved_statistics.append([iteration, time.time() - time_start, attempt_seeds[-1]])
 			break
 
-		reward = torch.as_tensor([reward])
 		if reward > max_reward:
 			max_reward = reward
-			max_reward_iter = iteration
 
 		if flag_deliberate_attempt:
-			next_state = torch.as_tensor(cube.faces.flatten(), dtype=torch.float32)
+			# Gather the cube's current state.
+			squares = torch.as_tensor(cube.faces.flatten(), dtype=torch.int64)
+			next_state = torch.zeros([num_states], dtype=torch.float32)
+			next_state[state_grid + squares] = 1
 			# Store the transition in memory
 			memory.push(state, action, next_state, reward)
 			state = next_state
 
 			# Perform one step of the optimization (on the target network)
-			# if iteration % BATCH_SIZE == 0:
 			optimize_model()
 
-			# Update the target network
+			# Update the target network.
 			if iteration % TARGET_UPDATE == 0:
 				target_net.load_state_dict(policy_net.state_dict())
 
 		if iteration % 1000 == 0:
 			show_statistics(
-				cube, num_correct, running_num_correct, running_stats_length, max_correct,
-				reward, max_reward, max_reward_iter, iteration, time_start)
+				cube, running_stats_length, num_correct, running_num_correct, max_correct,
+				reward, running_reward, max_reward, iteration, time_start)
 
 		iteration += 1
+		
+		# If set, discards the current cube and create a new one.
+		if flag_termination_point and iteration % termination_iteration == 0:
+			print('\n\nCreating a new cube.')
+			cube = Cube(edge_length=edge_length)
+			print('Scrambling...')
+			cube.scramble()
+			iteration = 0
+			max_correct = 0
+			best_cube = cube.copy()
+			max_reward = 0
+			time_start = time.time()
+			running_num_correct = [0] * running_stats_length
 
 	if len(solved_statistics) > 0:
 		show_solved_statistics()
