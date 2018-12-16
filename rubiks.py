@@ -1,7 +1,5 @@
 import numpy as np
-import math
 import random
-import time
 
 # Number of squares along each edge of the Cube.
 edge_length = 3
@@ -70,7 +68,7 @@ class Cube():
 	""" Emulates a Rubik's Cube. """
 	def __init__(self, edge_length):
 		self.edge_length = edge_length
-		self.faces = np.zeros([6,self.edge_length,self.edge_length], dtype=np.int32)
+		self.faces = np.zeros([6,self.edge_length,self.edge_length], dtype=np.uint8)
 
 		# cw_rotate_take_inds specifies how to rearrange a face upon clockwise rotation.
 		cw_rotate_take_inds = np.arange(self.edge_length * self.edge_length)
@@ -80,7 +78,6 @@ class Cube():
 		# Init each face with a single colour.
 		for face_idx in range(self.faces.shape[0]):
 			self.faces[face_idx].fill(face_idx)
-
 
 	def rotate_face(self, face, clockwise=True):
 		"""
@@ -95,7 +92,6 @@ class Cube():
 		self.faces[face] = np.take(
 			a=self.faces[face],
 			indices=indices).reshape(self.edge_length, self.edge_length)
-
 
 	def rotate_sides(self, face, clockwise=True):
 		"""
@@ -191,18 +187,15 @@ class Cube():
 				d_face[-1] = np.flip(l_face_copy.transpose()[-1], axis=[0])
 				r_face.transpose()[0] = d_face_copy[-1]
 				
-
 	def rotate(self, face, clockwise=True):
 		""" First rotates the given face in the given direction, then its sides. """
 		self.rotate_face(face, clockwise)
 		self.rotate_sides(face, clockwise)
 
-
 	def scramble(self, iterations=scramble_iterations):
 		""" Rotate the cube's faces randomly the specified number of times (iterations). """
 		for i in range(iterations):
-			self.take_random_action()
-
+			self.random_rotation()
 
 	def copy(self):
 		""" Create a copy of the cube. """
@@ -210,19 +203,12 @@ class Cube():
 		clone_cube.faces = np.copy(self.faces)
 		return clone_cube
 
-
-	def take_action(self, face, clockwise=True):
-		""" Take the specified rotation action. """
-		self.rotate(face=face, clockwise=clockwise)
-
-
-	def take_random_action(self):
+	def random_rotation(self):
 		""" Take a random rotation action. """
 		face = random.choice(range(6))
 		rotation = bool(random.getrandbits(1))
-		self.rotate(face=face, clockwise=rotation)
+		self.rotate(face, rotation)
 		return (face, rotation)
-
 
 	def __repr__(self):
 		""" Returns a coloured grid of the flattened cube. """
@@ -282,7 +268,6 @@ class Cube():
 			cube_str += '\n '
 
 		return cube_str
-
 
 	def __eq__(self, other):
 		return np.array_equal(self.faces, other.faces)

@@ -1,5 +1,4 @@
 import numpy as np
-import math
 import random
 import time
 import torch
@@ -8,6 +7,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from collections import namedtuple
 import signal
+import hashlib
 from rubiks import Cube, face_relations
 
 # Number of squares along each edge of the Cube.
@@ -27,22 +27,36 @@ root_seed = None
 attempt_seeds = []
 solved_stats = []
 
-# If True, discards the current Cube and creates a new one to solve.
+# If True, discard current Cube and create a new one at iter (term_iter).
 flag_term_point = True
-# Iteration at which to create a new Cube, if flag_term_point == True.
-term_iter = 500000
+term_iter = 600000
+
+# Used to determine the number of identical past states.
+cube_hash_dict = {}
+cube_hash_memory_size = 1000
+# Tracks last (cube_hash_memory_size) hashes, so as to delete old entries in cube_hash_dict.
+cube_hash_memory = None
+
+# Extra randomness is introduced when duplicate states are encountered.
+extra_rand = 0.
+# Max extra percentage inducable.
+extra_rand_max = 0.30
+# Used as an exponent in extra rand's calculation.
+# Larger values requires more duplicates to approach extra_rand_max,
+# steepening the curve and pushing it rightward.
+extra_rand_scaling_power = 2.6
 
 # Used in ReplayMemory class.
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
 
 # Parameters specific to the AI.
-BATCH_SIZE = 512
+BATCH_SIZE = 2048
 GAMMA = 0.999
 EPS_START = 0.975
-EPS_END = 0.1
-EPS_DECAY = 50000
+EPS_END = 0.025
+EPS_DECAY = 100000
 TARGET_UPDATE = BATCH_SIZE * 100
-MEMORY_SIZE = 10000
+TRANSITION_MEMORY_SIZE = 10000
 total_iterations = 0
 
 
@@ -54,22 +68,31 @@ def exit_gracefully(signum, frame):
 	global flag_continue_attempt
 	global flag_continue_main
 	global time_start
+	global best_cube
+	global max_correct
+
 	signal.signal(signal.SIGINT, original_sigint)
+	time_paused = time.time()
+	print()
 	try:
-		time_paused = time.time()
-		print()
+		if 'best_cube' in globals():
+			show_best_cube_statistics(best_cube, max_correct)
+
 		if len(solved_stats) > 0:
 			show_solved_stats()
+
 		input_text = input('\nReally Quit? (y/n)> ').lower().lstrip()
 		if input_text != '' and input_text[0] == 'y':
 			print('Exiting.')
 			flag_continue_main = False
 			flag_continue_attempt = False
-		time_start += time.time() - time_paused
+	
 	except KeyboardInterrupt:
 		print('\nExiting.')
 		flag_continue_main = False
 		flag_continue_attempt = False
+	
+	time_start += time.time() - time_paused
 	signal.signal(signal.SIGINT, exit_gracefully)
 
 
@@ -82,18 +105,18 @@ class NN(nn.Module):
 	def __init__(self):
 		super(NN, self).__init__()
 		num_squares = 6 * edge_length * edge_length
-		num_states = num_squares * 6
+		num_states = 6 * num_squares
 		num_outputs = 6 * 2
 
 		if num_layers == 1:
 			self.lin1 = nn.Linear(num_states, num_outputs)
 		elif num_layers == 2:
-			self.lin1 = nn.Linear(num_states, 24)
-			self.lin2 = nn.Linear(24, num_outputs)
+			self.lin1 = nn.Linear(num_states, 2 * num_outputs)
+			self.lin2 = nn.Linear(2 * num_outputs, num_outputs)
 		elif num_layers == 3:
 			self.lin1 = nn.Linear(num_states, num_squares)
-			self.lin2 = nn.Linear(num_squares, 24)
-			self.lin3 = nn.Linear(24, num_outputs)
+			self.lin2 = nn.Linear(num_squares, 2 * num_outputs)
+			self.lin3 = nn.Linear(2 * num_outputs, num_outputs)
 		else:
 			print('Error: Invalid number of layers! (Choose 1 -> 3)')
 			quit()
@@ -129,27 +152,55 @@ class ReplayMemory(object):
 		return len(self.memory)
 
 
-# Creation of NNs and related objects.
-policy_net = NN()
-target_net = NN()
-target_net.load_state_dict(policy_net.state_dict())
-target_net.eval()
-optimizer = optim.RMSprop(policy_net.parameters())
-memory = ReplayMemory(MEMORY_SIZE)
-
-
 def select_action(state):
 	""" Generate an action, depending on the current state. """
 	global total_iterations
+	global eps_threshold
+	global extra_rand
+
 	sample = random.random()
 	eps_threshold = EPS_END + (EPS_START - EPS_END) * \
-		math.exp(-1. * total_iterations / EPS_DECAY)
+		np.exp(-1. * total_iterations / EPS_DECAY)
+
+	if att_iter >= cube_hash_memory_size:
+		# Update extra_rand once in a while.
+		if att_iter % (cube_hash_memory_size/20) == 0:
+			extra_rand = update_extra_rand()
+		eps_threshold = max(eps_threshold, extra_rand)
+
 	total_iterations += 1
 	if sample > eps_threshold:
 		with torch.no_grad():
 			return np.argmax(policy_net(state)).view(1)
 	else:
 		return torch.randint(low=0, high=6*2, size=(1,), dtype=torch.long)
+
+
+def update_extra_rand():
+	"""
+	Determine how much extra randomness should be introduced,
+	depending on the number of identical recent states.
+	Introduces considerable cost when >> 1000 dict elements.
+	"""
+	# Using PyTorch takes slightly longer for small dictionaries (1000 elems).
+	# cube_hash_dict_values = torch.tensor(list(cube_hash_dict.values()))
+	# num_duplicates = torch.sum(cube_hash_dict_values > 1)
+
+	num_duplicates = sum([x - 1 for x in cube_hash_dict.values()])
+	extra_rand = (num_duplicates ** extra_rand_scaling_power) / (cube_hash_memory_size ** extra_rand_scaling_power)
+	extra_rand *= extra_rand_max
+
+	return extra_rand
+
+
+def clear_cube_hashes():
+	""" Clear the past cube state memory. """
+	global cube_hash_memory
+	global cube_hash_dict
+
+	cube_hash_memory = [0] * cube_hash_memory_size
+	cube_hash_dict = {}
+
 
 def optimize_model():
 	""" Update the model. """
@@ -186,269 +237,227 @@ def reward_function(cube):
 	""" Calculates a cube's reward, which is a scalar measurement of how good it is. """
 	total_correct = 0.
 	reward = 0.
-	edge_length = cube.edge_length
+
+	# Check corner correctness.
 	total_correct_corners = 0
+	total_correct_corners += check_corners(cube.faces)
+	total_correct_corners *= 3
+	total_correct += total_correct_corners
 
-	# Look at each face of the given cube.
+	if cube.edge_length >= 3:
+		# Check edge correctness.
+		total_correct_edges = 0
+		total_correct_edges += check_edges(cube.faces, cube.edge_length)
+		total_correct_edges *= 2
+		total_correct += total_correct_edges
+
+		# Check inner correctness.
+		total_correct_inner = check_inner(cube.faces, cube.edge_length)
+		total_correct += total_correct_inner
+
+	reward += total_correct
+
 	for face_idx,face in enumerate(cube.faces):
-		# Count the number of correctly coloured squares.
+		# Provides up to 1 extra point for each face, depending on colour correctness.
 		num_correct_colours = np.sum(face.flatten() == face_idx)
-		total_correct += num_correct_colours
-		reward += num_correct_colours
+		reward += num_correct_colours / (cube.edge_length * cube.edge_length)
 
-		if num_correct_colours == edge_length * edge_length:
-			# All squares are the correct colour.
-			reward += 2 * (edge_length - 1)
-		elif num_correct_colours >= edge_length * edge_length / 2:
-			# Half of the squares are the correct colour.
-			reward += 1 * (edge_length - 1)
-
-		num_correct_corners = check_corners(cube.faces, face_idx)
-		if num_correct_corners == 4:
-			# Reward more if all corners of a face are correct.
-			reward += 1
-		total_correct_corners += num_correct_corners
-
-	reward += (total_correct_corners / 3) * edge_length
-	# Increase disparity between top solutions
-	reward **= 1.5
 	return total_correct, reward
 
 
-def check_corners(faces, face_idx):
-	""" Returns the number of corners of a face that are correct for all 3 of their sides. """
+def check_inner(faces, edge_length):
+	"""
+	Returns the number of inner blocks of a cube that are correct.
+	"""
+	num_correct_inner = 0
+
+	for face_idx in range(6):
+		num_correct_inner += np.sum(faces[face_idx, 1:-1, 1:-1] == face_idx)
+	return num_correct_inner
+
+
+def check_edges(faces, edge_length):
+	"""
+	Returns the number of edge blocks of a cube that are entirely correct.
+	"""
+	num_correct_edges = 0
+
+	for face_idx in [0, 5]:
+		# Face above.
+		u_face_colour = face_relations['_'.join([str(face_idx), 'u'])]
+		u_face = faces[u_face_colour]
+
+		# Face to the left.
+		l_face_colour = face_relations['_'.join([str(face_idx), 'l'])]
+		l_face = faces[l_face_colour]
+
+		# Face below.
+		d_face_colour = face_relations['_'.join([str(face_idx), 'd'])]
+		d_face = faces[d_face_colour]
+
+		# Face to the right.
+		r_face_colour = face_relations['_'.join([str(face_idx), 'r'])]
+		r_face = faces[r_face_colour]
+
+		if face_idx == 0:
+			for edge_idx in range(1, edge_length - 1):
+				# Upper edge
+				if faces[face_idx, 0, edge_idx] == face_idx:
+					u_face_edge = u_face[-1, edge_idx]
+					if u_face_edge == u_face_colour:
+						num_correct_edges += 1
+
+				# Left edge
+				if faces[face_idx, edge_idx, 0] == face_idx:
+					l_face_edge = l_face[edge_idx, -1]
+					if l_face_edge == l_face_colour:
+						num_correct_edges += 1
+
+				# Bottom edge
+				if faces[face_idx, -1, edge_idx] == face_idx:
+					d_face_edge = d_face[0, edge_idx]
+					if d_face_edge == d_face_colour:
+						num_correct_edges += 1
+
+				# Right edge
+				if faces[face_idx, edge_idx, -1] == face_idx:
+					r_face_edge = r_face[edge_idx, 0]
+					if r_face_edge == r_face_colour:
+						num_correct_edges += 1
+
+		if face_idx == 5:
+			for edge_idx in range(1, edge_length - 1):
+				# Upper edge
+				if faces[face_idx, 0, edge_idx] == face_idx:
+					u_face_edge = u_face[0, -1-edge_idx]
+					if u_face_edge == u_face_colour:
+						num_correct_edges += 1
+
+				# Left edge
+				if faces[face_idx, edge_idx, 0] == face_idx:
+					l_face_edge = l_face[edge_idx, -1]
+					if l_face_edge == l_face_colour:
+						num_correct_edges += 1
+
+				# Bottom edge
+				if faces[face_idx, -1, edge_idx] == face_idx:
+					d_face_edge = d_face[-1, -1-edge_idx]
+					if d_face_edge == d_face_colour:
+						num_correct_edges += 1
+
+				# Right edge
+				if faces[face_idx, edge_idx, -1] == face_idx:
+					r_face_edge = r_face[edge_idx, -1]
+					if r_face_edge == r_face_colour:
+						num_correct_edges += 1
+
+	return num_correct_edges
+
+
+def check_corners(faces):
+	"""
+	Returns the number of corner blocks of a cube that are entirely correct.
+	"""
 	num_correct_corners = 0
 
-	# Face above.
-	u_face_colour = face_relations['_'.join([str(face_idx), 'u'])]
-	u_face = faces[u_face_colour]
+	for face_idx in [0, 5]:
+		# Face above.
+		u_face_colour = face_relations['_'.join([str(face_idx), 'u'])]
+		u_face = faces[u_face_colour]
 
-	# Face to the left.
-	l_face_colour = face_relations['_'.join([str(face_idx), 'l'])]
-	l_face = faces[l_face_colour]
+		# Face to the left.
+		l_face_colour = face_relations['_'.join([str(face_idx), 'l'])]
+		l_face = faces[l_face_colour]
 
-	# Face below.
-	d_face_colour = face_relations['_'.join([str(face_idx), 'd'])]
-	d_face = faces[d_face_colour]
+		# Face below.
+		d_face_colour = face_relations['_'.join([str(face_idx), 'd'])]
+		d_face = faces[d_face_colour]
 
-	# Face to the right.
-	r_face_colour = face_relations['_'.join([str(face_idx), 'r'])]
-	r_face = faces[r_face_colour]
+		# Face to the right.
+		r_face_colour = face_relations['_'.join([str(face_idx), 'r'])]
+		r_face = faces[r_face_colour]
 
-	if face_idx == 0:
-		# Top-left
-		if faces[face_idx, 0, 0] == face_idx:
-			l_face_corner = l_face[0, -1]
-			if l_face_corner == l_face_colour:
-				u_face_corner = u_face[-1, 0]
-				if u_face_corner == u_face_colour:
-					num_correct_corners += 1
+		if face_idx == 0:
+			# Top-left
+			if faces[face_idx, 0, 0] == face_idx:
+				l_face_corner = l_face[0, -1]
+				if l_face_corner == l_face_colour:
+					u_face_corner = u_face[-1, 0]
+					if u_face_corner == u_face_colour:
+						num_correct_corners += 1
 
-		# Top-right
-		if faces[face_idx, 0, -1] == face_idx:
-			r_face_corner = r_face[0, 0]
-			if r_face_corner == r_face_colour:
-				u_face_corner = u_face[-1, -1]
-				if u_face_corner == u_face_colour:
-					num_correct_corners += 1
+			# Top-right
+			if faces[face_idx, 0, -1] == face_idx:
+				r_face_corner = r_face[0, 0]
+				if r_face_corner == r_face_colour:
+					u_face_corner = u_face[-1, -1]
+					if u_face_corner == u_face_colour:
+						num_correct_corners += 1
 
-		# Bottom-left
-		if faces[face_idx, -1, 0] == face_idx:
-			l_face_corner = l_face[-1, -1]
-			if l_face_corner == l_face_colour:
-				d_face_corner = d_face[0, 0]
-				if d_face_corner == d_face_colour:
-					num_correct_corners += 1
+			# Bottom-left
+			if faces[face_idx, -1, 0] == face_idx:
+				l_face_corner = l_face[-1, -1]
+				if l_face_corner == l_face_colour:
+					d_face_corner = d_face[0, 0]
+					if d_face_corner == d_face_colour:
+						num_correct_corners += 1
 
-		# Bottom-right
-		if faces[face_idx, -1, -1] == face_idx:
-			r_face_corner = r_face[-1, 0]
-			if r_face_corner == r_face_colour:
-				d_face_corner = d_face[0, -1]
-				if d_face_corner == d_face_colour:
-					num_correct_corners += 1
+			# Bottom-right
+			if faces[face_idx, -1, -1] == face_idx:
+				r_face_corner = r_face[-1, 0]
+				if r_face_corner == r_face_colour:
+					d_face_corner = d_face[0, -1]
+					if d_face_corner == d_face_colour:
+						num_correct_corners += 1
 
-	elif face_idx == 1:
-		# Top-left
-		if faces[face_idx, 0, 0] == face_idx:
-			l_face_corner = l_face[0, 0]
-			if l_face_corner == l_face_colour:
-				u_face_corner = u_face[0, -1]
-				if u_face_corner == u_face_colour:
-					num_correct_corners += 1
+		elif face_idx == 5:
+			# Top-left
+			if faces[face_idx, 0, 0] == face_idx:
+				l_face_corner = l_face[0, -1]
+				if l_face_corner == l_face_colour:
+					u_face_corner = u_face[0, -1]
+					if u_face_corner == u_face_colour:
+						num_correct_corners += 1
 
-		# Top-right
-		if faces[face_idx, 0, -1] == face_idx:
-			r_face_corner = r_face[0, -1]
-			if r_face_corner == r_face_colour:
-				u_face_corner = u_face[0, 0]
-				if u_face_corner == u_face_colour:
-					num_correct_corners += 1
+			# Top-right
+			if faces[face_idx, 0, -1] == face_idx:
+				r_face_corner = r_face[0, 0]
+				if r_face_corner == r_face_colour:
+					u_face_corner = u_face[0, 0]
+					if u_face_corner == u_face_colour:
+						num_correct_corners += 1
 
-		# Bottom-left
-		if faces[face_idx, -1, 0] == face_idx:
-			l_face_corner = l_face[0, -1]
-			if l_face_corner == l_face_colour:
-				d_face_corner = d_face[0, 0]
-				if d_face_corner == d_face_colour:
-					num_correct_corners += 1
+			# Bottom-left
+			if faces[face_idx, -1, 0] == face_idx:
+				l_face_corner = l_face[-1, -1]
+				if l_face_corner == l_face_colour:
+					d_face_corner = d_face[-1, -1]
+					if d_face_corner == d_face_colour:
+						num_correct_corners += 1
 
-		# Bottom-right
-		if faces[face_idx, -1, -1] == face_idx:
-			r_face_corner = r_face[0, 0]
-			if r_face_corner == r_face_colour:
-				d_face_corner = d_face[0, -1]
-				if d_face_corner == d_face_colour:
-					num_correct_corners += 1
-
-	elif face_idx == 2:
-		# Top-left
-		if faces[face_idx, 0, 0] == face_idx:
-			l_face_corner = l_face[0, -1]
-			if l_face_corner == l_face_colour:
-				u_face_corner = u_face[0, 0]
-				if u_face_corner == u_face_colour:
-					num_correct_corners += 1
-
-		# Top-right
-		if faces[face_idx, 0, -1] == face_idx:
-			r_face_corner = r_face[0, 0]
-			if r_face_corner == r_face_colour:
-				u_face_corner = u_face[-1, 0]
-				if u_face_corner == u_face_colour:
-					num_correct_corners += 1
-
-		# Bottom-left
-		if faces[face_idx, -1, 0] == face_idx:
-			l_face_corner = l_face[-1, -1]
-			if l_face_corner == l_face_colour:
-				d_face_corner = d_face[-1, 0]
-				if d_face_corner == d_face_colour:
-					num_correct_corners += 1
-
-		# Bottom-right
-		if faces[face_idx, -1, -1] == face_idx:
-			r_face_corner = r_face[-1, 0]
-			if r_face_corner == r_face_colour:
-				d_face_corner = d_face[0, 0]
-				if d_face_corner == d_face_colour:
-					num_correct_corners += 1
-
-	elif face_idx == 3:
-		# Top-left
-		if faces[face_idx, 0, 0] == face_idx:
-			l_face_corner = l_face[-1, -1]
-			if l_face_corner == l_face_colour:
-				u_face_corner = u_face[-1, 0]
-				if u_face_corner == u_face_colour:
-					num_correct_corners += 1
-
-		# Top-right
-		if faces[face_idx, 0, -1] == face_idx:
-			r_face_corner = r_face[-1, 0]
-			if r_face_corner == r_face_colour:
-				u_face_corner = u_face[-1, -1]
-				if u_face_corner == u_face_colour:
-					num_correct_corners += 1
-
-		# Bottom-left
-		if faces[face_idx, -1, 0] == face_idx:
-			l_face_corner = l_face[-1, 0]
-			if l_face_corner == l_face_colour:
-				d_face_corner = d_face[-1, -1]
-				if d_face_corner == d_face_colour:
-					num_correct_corners += 1
-
-		# Bottom-right
-		if faces[face_idx, -1, -1] == face_idx:
-			r_face_corner = r_face[-1, -1]
-			if r_face_corner == r_face_colour:
-				d_face_corner = d_face[-1, 0]
-				if d_face_corner == d_face_colour:
-					num_correct_corners += 1
-
-	elif face_idx == 4:
-		# Top-left
-		if faces[face_idx, 0, 0] == face_idx:
-			l_face_corner = l_face[0, -1]
-			if l_face_corner == l_face_colour:
-				u_face_corner = u_face[-1, -1]
-				if u_face_corner == u_face_colour:
-					num_correct_corners += 1
-
-		# Top-right
-		if faces[face_idx, 0, -1] == face_idx:
-			r_face_corner = r_face[0, 0]
-			if r_face_corner == r_face_colour:
-				u_face_corner = u_face[0, -1]
-				if u_face_corner == u_face_colour:
-					num_correct_corners += 1
-
-		# Bottom-left
-		if faces[face_idx, -1, 0] == face_idx:
-			l_face_corner = l_face[-1, -1]
-			if l_face_corner == l_face_colour:
-				d_face_corner = d_face[0, -1]
-				if d_face_corner == d_face_colour:
-					num_correct_corners += 1
-
-		# Bottom-right
-		if faces[face_idx, -1, -1] == face_idx:
-			r_face_corner = r_face[-1, 0]
-			if r_face_corner == r_face_colour:
-				d_face_corner = d_face[-1, -1]
-				if d_face_corner == d_face_colour:
-					num_correct_corners += 1
-
-	elif face_idx == 5:
-		# Top-left
-		if faces[face_idx, 0, 0] == face_idx:
-			l_face_corner = l_face[0, -1]
-			if l_face_corner == l_face_colour:
-				u_face_corner = u_face[0, -1]
-				if u_face_corner == u_face_colour:
-					num_correct_corners += 1
-
-		# Top-right
-		if faces[face_idx, 0, -1] == face_idx:
-			r_face_corner = r_face[0, 0]
-			if r_face_corner == r_face_colour:
-				u_face_corner = u_face[0, 0]
-				if u_face_corner == u_face_colour:
-					num_correct_corners += 1
-
-		# Bottom-left
-		if faces[face_idx, -1, 0] == face_idx:
-			l_face_corner = l_face[-1, -1]
-			if l_face_corner == l_face_colour:
-				d_face_corner = d_face[-1, -1]
-				if d_face_corner == d_face_colour:
-					num_correct_corners += 1
-
-		# Bottom-right
-		if faces[face_idx, -1, -1] == face_idx:
-			r_face_corner = r_face[-1, 0]
-			if r_face_corner == r_face_colour:
-				d_face_corner = d_face[-1, 0]
-				if d_face_corner == d_face_colour:
-					num_correct_corners += 1
+			# Bottom-right
+			if faces[face_idx, -1, -1] == face_idx:
+				r_face_corner = r_face[-1, 0]
+				if r_face_corner == r_face_colour:
+					d_face_corner = d_face[-1, 0]
+					if d_face_corner == d_face_colour:
+						num_correct_corners += 1
 
 	return num_correct_corners
 
 
 def show_stats(
 		cube, running_stats_length, num_correct, running_num_correct, max_correct,
-		reward, running_reward, max_reward, iteration, time_start):
+		reward, running_reward, max_reward, att_iter, time_start):
 	""" Format and display the provided cube and statistics. """
 	print(cube)
 	print('Correct:     (Current: {0:3}, Running: {1:7.3f}, Max: {2:4})'.format(
 		int(num_correct), sum(running_num_correct)/running_stats_length, int(max_correct)))
 	print('Reward:      (Current: {0:3}, Running: {1:7.3f}, Max: {2:4})'.format(
 		int(reward), sum(running_reward)/running_stats_length, int(max_reward)))
-	randomness = EPS_END + (EPS_START - EPS_END) * \
-		math.exp(-1. * total_iterations / EPS_DECAY)
-	print('Randomness: {0:.2f}%'.format(100 * randomness))
-	print('Current Iter: {0}'.format(iteration))
+	if flag_deliberate_attempt:
+		print('Randomness: {0:.2f}%'.format(100 * eps_threshold))
+	print('Current Iter: {0}'.format(att_iter))
 	print('Current Time: {0} seconds'.format(int(time.time() - time_start)))
 
 
@@ -457,7 +466,7 @@ def show_solved_stats():
 	print()
 	print('Solved statistics:')
 	for idx,stat in enumerate(solved_stats):
-		print('Cube {0:>3} (Attempt {1:>3}): Iterations:\t{2:>7}, Time:\t{3:>5}, Seed:\t{4:>10}'.format(
+		print('Cube {0:>3} (Attempt {1:>3}): Iterations: {2:>7}, Time: {3:>5}, Seed: {4:>10}'.format(
 			idx, stat[0], stat[1], int(stat[2]), stat[3]))
 	print()
 
@@ -465,19 +474,24 @@ def show_solved_stats():
 def show_best_cube_statistics(cube, max_correct):
 	""" Show the given best cube and its number of correct squares. """
 	print('\n\n\nAttempt seed: {0}'.format(attempt_seeds[-1]))
-	print('Best cube ({0} correct colours):'.format(int(max_correct)))
+	print('Best cube ({0} correct blocks):'.format(int(max_correct)))
 	print(cube)
 
 
 def solution_attempt():
 	"""
 	Attempt to solve a Rubik's Cube.
-	Depending on flag_deliberate_attempt, may use an AI to learn,
+	Wil use an AI to learn if flag_deliberate_attempt == True,
 	otherwise will take random actions.
 	"""
 	global attempt_num
 	global time_start
+	global best_cube
+	global max_correct
+	global att_iter
+	global cube_hash_dict
 	global flag_continue_attempt
+
 	# Dictates continuation of each attempt.
 	flag_continue_attempt = True
 
@@ -490,7 +504,7 @@ def solution_attempt():
 	
 	num_squares = 6 * cube.edge_length * cube.edge_length
 	num_states = num_squares * 6
-	iteration = 0
+	att_iter = 0
 	max_correct = 0
 	best_cube = cube.copy()
 	max_reward = 0
@@ -498,6 +512,8 @@ def solution_attempt():
 	running_stats_length = 1000
 	running_num_correct = [0] * running_stats_length
 	running_reward = [0] * running_stats_length
+
+	clear_cube_hashes()
 
 	if flag_deliberate_attempt:
 		# Used to translate the cube's state into boolean values.
@@ -515,15 +531,35 @@ def solution_attempt():
 			face = int(action / 2)
 			rotation = action % 2
 			# Take the action.
-			cube.take_action(face, rotation)
+			cube.rotate(face, rotation)
+
+			# Hash the cube's current state.
+			cube_hash = hashlib.sha1(cube.faces).digest()
+
+			if att_iter > cube_hash_memory_size:
+				# Decrement or delete oldest hash, depending on its number of occurences.
+				if cube_hash_dict[cube_hash_memory[att_iter % cube_hash_memory_size]] == 1:
+					del cube_hash_dict[cube_hash_memory[att_iter % cube_hash_memory_size]]
+				else:
+					cube_hash_dict[cube_hash_memory[att_iter % cube_hash_memory_size]] -= 1
+
+			# Overwrite oldest space with newest hash.
+			cube_hash_memory[att_iter % cube_hash_memory_size] = cube_hash
+
+			# Increment or create the newest hash in the hash dict.
+			if cube_hash in cube_hash_dict:
+				cube_hash_dict[cube_hash] += 1
+			else:
+				cube_hash_dict[cube_hash] = 1
+
 		else:
 			# Take a random action.
-			cube.take_random_action()
+			cube.random_rotation()
 
 		# Compute the number of correctly-coloured squares and corresponding reward.
 		num_correct, reward = reward_function(cube)
-		running_num_correct[iteration % running_stats_length] = num_correct
-		running_reward[iteration % running_stats_length] = reward
+		running_num_correct[att_iter % running_stats_length] = num_correct
+		running_reward[att_iter % running_stats_length] = reward
 		reward = torch.as_tensor([reward])
 
 		if num_correct > max_correct:
@@ -532,7 +568,7 @@ def solution_attempt():
 
 		if num_correct == num_squares:
 			print('\n\nSolved!')
-			solved_stats.append([attempt_num, iteration, time.time() - time_start, attempt_seeds[-1]])
+			solved_stats.append([attempt_num, att_iter, time.time() - time_start, attempt_seeds[-1]])
 			break
 
 		if reward > max_reward:
@@ -547,38 +583,51 @@ def solution_attempt():
 			memory.push(state, action, next_state, reward)
 			state = next_state
 
-			if iteration % BATCH_SIZE == 0:
+			if att_iter % BATCH_SIZE == 0:
 				# Perform one step of the optimization.
 				optimize_model()
 
-			if iteration % TARGET_UPDATE == 0:
+			if att_iter % TARGET_UPDATE == 0:
 				# Update the target network.
 				target_net.load_state_dict(policy_net.state_dict())
 
-		if iteration % 1000 == 0:
+		if att_iter % 1000 == 0:
 			show_stats(
 				cube, running_stats_length, num_correct, running_num_correct, max_correct,
-				reward, running_reward, max_reward, iteration, time_start)
+				reward, running_reward, max_reward, att_iter, time_start)
 		
-		iteration += 1
+		att_iter += 1
 
 		# If set, discards the current cube and creates a new one at term_iter iteration.
-		if flag_term_point and iteration % term_iter == 0:
+		if flag_term_point and att_iter % term_iter == 0:
 			print('\n\nTermination point reached.')
+			show_best_cube_statistics(best_cube, max_correct)
+			clear_cube_hashes()
+			attempt_num
 			print('Creating a new cube.')
 			cube = Cube(edge_length=edge_length)
 			print('Scrambling...')
 			cube.scramble()
-			iteration = 0
+			att_iter = 0
 			max_correct = 0
 			best_cube = cube.copy()
 			max_reward = 0
 			time_start = time.time()
 			running_num_correct = [0] * running_stats_length
 
-	if len(solved_stats) > 0:
-		show_solved_stats()
-	show_best_cube_statistics(best_cube, max_correct)
+	if flag_continue_main:
+		if len(solved_stats) > 0:
+			show_solved_stats()
+		show_best_cube_statistics(best_cube, max_correct)
+
+
+# Creation of NNs and related objects.
+policy_net = NN()
+target_net = NN()
+target_net.load_state_dict(policy_net.state_dict())
+target_net.eval()
+optimizer = optim.RMSprop(policy_net.parameters())
+memory = ReplayMemory(TRANSITION_MEMORY_SIZE)
 
 
 def main():
