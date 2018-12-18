@@ -8,20 +8,22 @@ import torch.nn.functional as F
 from collections import namedtuple
 import signal
 import hashlib
+import getopt
+import sys
 from rubiks import Cube, face_relations
 
 # Number of squares along each edge of the Cube.
 edge_length = 2
-
-# If True, attempts to learn through reinforcement learning.
-# Otherwise, random actions are taken.
-flag_deliberate_attempt = True
 
 # Number of layers to use in the NN.
 num_layers = 2
 
 # Starting attempt's random seed. Will be used if != None.
 root_seed = None
+
+# If True, attempts to learn through reinforcement learning.
+# Otherwise, random actions are taken.
+flag_deliberate_attempt = True
 
 # Tracks used seeds and solution statistics.
 attempt_seeds = []
@@ -33,27 +35,27 @@ term_iter = 600000
 
 # Used to determine the number of identical past states.
 cube_hash_dict = {}
-cube_hash_memory_size = 1000
-# Tracks last (cube_hash_memory_size) hashes, so as to delete old entries in cube_hash_dict.
+cube_hash_memory_size = 500
+# Tracks last (cube_hash_memory_size) hashes, so as to decrement/delete old entries in cube_hash_dict.
 cube_hash_memory = None
 
 # Extra randomness is introduced when duplicate states are encountered.
 extra_rand = 0.
-# Max extra percentage inducable.
-extra_rand_max = 0.30
+# Max dynamic randomness inducable by periodic evaluation.
+extra_rand_max = 0.35
 # Used as an exponent in extra rand's calculation.
 # Larger values requires more duplicates to approach extra_rand_max,
 # steepening the curve and pushing it rightward.
-extra_rand_scaling_power = 2.6
+extra_rand_scaling_power = 0.8
 
 # Used in ReplayMemory class.
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
 
 # Parameters specific to the AI.
-BATCH_SIZE = 2048
+BATCH_SIZE = 1024
 GAMMA = 0.999
 EPS_START = 0.975
-EPS_END = 0.025
+EPS_END = 0.15
 EPS_DECAY = 100000
 TARGET_UPDATE = BATCH_SIZE * 100
 TRANSITION_MEMORY_SIZE = 10000
@@ -73,7 +75,7 @@ def exit_gracefully(signum, frame):
 
 	signal.signal(signal.SIGINT, original_sigint)
 	time_paused = time.time()
-	print()
+	print('\n\n---------- PAUSING ----------')
 	try:
 		if 'best_cube' in globals():
 			show_best_cube_statistics(best_cube, max_correct)
@@ -92,7 +94,9 @@ def exit_gracefully(signum, frame):
 		flag_continue_main = False
 		flag_continue_attempt = False
 	
-	time_start += time.time() - time_paused
+	print('\n---------- RESUMING ----------')
+	if 'time_start' in globals():
+		time_start += time.time() - time_paused
 	signal.signal(signal.SIGINT, exit_gracefully)
 
 
@@ -107,6 +111,8 @@ class NN(nn.Module):
 		num_squares = 6 * edge_length * edge_length
 		num_states = 6 * num_squares
 		num_outputs = 6 * 2
+
+		self.drop1 = nn.AlphaDropout(0.01, True)
 
 		if num_layers == 1:
 			self.lin1 = nn.Linear(num_states, num_outputs)
@@ -125,6 +131,7 @@ class NN(nn.Module):
 		if num_layers >= 1:
 			x = self.lin1(x)
 		if num_layers >= 2:
+			x = self.drop1(x)
 			x = self.lin2(x)
 		if num_layers >= 3:
 			x = self.lin3(x)
@@ -473,7 +480,7 @@ def show_solved_stats():
 
 def show_best_cube_statistics(cube, max_correct):
 	""" Show the given best cube and its number of correct squares. """
-	print('\n\n\nAttempt seed: {0}'.format(attempt_seeds[-1]))
+	print('\n\nAttempt seed: {0}'.format(attempt_seeds[-1]))
 	print('Best cube ({0} correct blocks):'.format(int(max_correct)))
 	print(cube)
 
@@ -481,7 +488,7 @@ def show_best_cube_statistics(cube, max_correct):
 def solution_attempt():
 	"""
 	Attempt to solve a Rubik's Cube.
-	Wil use an AI to learn if flag_deliberate_attempt == True,
+	Will use an AI if flag_deliberate_attempt == True,
 	otherwise will take random actions.
 	"""
 	global attempt_num
@@ -496,7 +503,7 @@ def solution_attempt():
 	flag_continue_attempt = True
 
 	cube = Cube(edge_length=edge_length)
-	print('Original cube:')
+	print('\nOriginal cube:')
 	print(cube)
 
 	print('\n\nScrambling...')
@@ -560,7 +567,6 @@ def solution_attempt():
 		num_correct, reward = reward_function(cube)
 		running_num_correct[att_iter % running_stats_length] = num_correct
 		running_reward[att_iter % running_stats_length] = reward
-		reward = torch.as_tensor([reward])
 
 		if num_correct > max_correct:
 			max_correct = num_correct
@@ -580,7 +586,7 @@ def solution_attempt():
 			next_state = torch.zeros([num_states], dtype=torch.float32)
 			next_state[state_grid + squares] = 1
 			# Store the transition in memory
-			memory.push(state, action, next_state, reward)
+			memory.push(state, action, next_state, torch.as_tensor([reward]))
 			state = next_state
 
 			if att_iter % BATCH_SIZE == 0:
@@ -595,7 +601,7 @@ def solution_attempt():
 			show_stats(
 				cube, running_stats_length, num_correct, running_num_correct, max_correct,
 				reward, running_reward, max_reward, att_iter, time_start)
-		
+
 		att_iter += 1
 
 		# If set, discards the current cube and creates a new one at term_iter iteration.
@@ -603,7 +609,7 @@ def solution_attempt():
 			print('\n\nTermination point reached.')
 			show_best_cube_statistics(best_cube, max_correct)
 			clear_cube_hashes()
-			attempt_num
+			attempt_num += 1
 			print('Creating a new cube.')
 			cube = Cube(edge_length=edge_length)
 			print('Scrambling...')
@@ -621,16 +627,83 @@ def solution_attempt():
 		show_best_cube_statistics(best_cube, max_correct)
 
 
-# Creation of NNs and related objects.
-policy_net = NN()
-target_net = NN()
-target_net.load_state_dict(policy_net.state_dict())
-target_net.eval()
-optimizer = optim.RMSprop(policy_net.parameters())
-memory = ReplayMemory(TRANSITION_MEMORY_SIZE)
-
-
 def main():
+	global edge_length
+	global num_layers
+	global root_seed
+	global flag_deliberate_attempt
+
+	global memory
+	global policy_net
+	global target_net
+	global optimizer
+
+	# Read all command-line parameters.
+	try:
+		opts, args = getopt.getopt(sys.argv[1:], 's:l:h', ['size=', 'layers=', 'seed=', 'random', 'help'])
+		for opt, arg in opts:
+			if opt in ('-h', '--help'):
+				print('Options:')
+				print(' -s N, --size=N      number of squares per Cube edge (default: 2)')
+				print(' -l N, --layers=N    number of layers in the NN (default: 2)')
+				print(' --seed=N            set the RNG seed')
+				print(' --random            only use random choices, no AI')
+				print(' -h, --help          display this help page and exit')
+				print('\n')
+				quit()
+
+			elif opt in ('-s', '--size'):
+				try:
+					arg = int(arg)
+					if arg >= 2:
+						edge_length = int(arg)
+						print('Cube size set to {0}.'.format(edge_length))
+					else:
+						print('Provided cube size is not valid. '
+							+ 'Setting to default of {0}.'.format(edge_length))
+				except ValueError:
+					print('Provided cube size is not valid. '
+						+ 'Setting to default of {0}.'.format(edge_length))
+
+			elif opt in ('-l', '--layers'):
+				try:
+					arg = int(arg)
+					if arg >= 1:
+						num_layers = int(arg)
+						print('NN layers set to {0}.'.format(num_layers))
+					else:
+						print('Provided number of layers is not valid. '
+							+ 'Setting to default of {0}.'.format(num_layers))
+				except ValueError:
+					print('Provided number of layers is not valid. '
+						+ 'Setting to default of {0}.'.format(num_layers))
+
+			elif opt in ('--seed'):
+				try:
+					arg = int(arg)
+					root_seed = arg
+					print('RNG seed set to {0}'.format(root_seed))
+				except ValueError:
+					print('Provided RNG seed is not valid.')
+
+			elif opt in ('--random'):
+				flag_deliberate_attempt = False
+				print('Only using random choices during solution attempts.')
+
+	except getopt.GetoptError:
+		print('\nError: Unrecognized option provided,'
+			+ ' or an option that requires an argument was given none.')
+		print('Call with option \'--help\' for the help page.\n\n')
+		quit()
+
+	# Creation of NNs and related objects.
+	policy_net = NN()
+	target_net = NN()
+	target_net.load_state_dict(policy_net.state_dict())
+	target_net.eval()
+	optimizer = optim.RMSprop(policy_net.parameters())
+	memory = ReplayMemory(TRANSITION_MEMORY_SIZE)
+
 	# Dictates continuation of main loop.
 	global flag_continue_main
 	flag_continue_main = True
