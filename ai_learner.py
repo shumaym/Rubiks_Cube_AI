@@ -7,16 +7,15 @@ import torch.optim as optim
 import torch.nn.functional as F
 from collections import namedtuple
 import signal
-import hashlib
 import getopt
 import sys
 from rubiks import Cube, face_relations
 
-# Number of squares along each edge of the Cube.
+# Number of blocks along each edge of the Cube.
 edge_length = 2
 
 # Number of layers to use in the NN.
-num_layers = 2
+num_layers = 3
 
 # Starting attempt's random seed. Will be used if != None.
 root_seed = None
@@ -33,33 +32,20 @@ solved_stats = []
 flag_term_point = True
 term_iter = 600000
 
-# Used to determine the number of identical past states.
-cube_hash_dict = {}
-cube_hash_memory_size = 500
-# Tracks last (cube_hash_memory_size) hashes, so as to decrement/delete old entries in cube_hash_dict.
-cube_hash_memory = None
-
-# Extra randomness is introduced when duplicate states are encountered.
-extra_rand = 0.
-# Max dynamic randomness inducable by periodic evaluation.
-extra_rand_max = 0.35
-# Used as an exponent in extra rand's calculation.
-# Larger values requires more duplicates to approach extra_rand_max,
-# steepening the curve and pushing it rightward.
-extra_rand_scaling_power = 0.8
-
 # Used in ReplayMemory class.
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
 
 # Parameters specific to the AI.
-BATCH_SIZE = 1024
-GAMMA = 0.999
+BATCH_SIZE = 4096
+GAMMA = 0.95
 EPS_START = 0.975
-EPS_END = 0.15
-EPS_DECAY = 100000
-TARGET_UPDATE = BATCH_SIZE * 100
+EPS_END = 0.025
+EPS_DECAY = 1000000
 TRANSITION_MEMORY_SIZE = 10000
 total_iterations = 0
+
+# Memory of the past 3 actions, used for simple rule enforcement.
+recent_actions = [-1, -1, -1]
 
 
 def exit_gracefully(signum, frame):
@@ -85,16 +71,17 @@ def exit_gracefully(signum, frame):
 
 		input_text = input('\nReally Quit? (y/n)> ').lower().lstrip()
 		if input_text != '' and input_text[0] == 'y':
-			print('Exiting.')
 			flag_continue_main = False
 			flag_continue_attempt = False
 	
 	except KeyboardInterrupt:
-		print('\nExiting.')
 		flag_continue_main = False
 		flag_continue_attempt = False
-	
-	print('\n---------- RESUMING ----------')
+
+	if flag_continue_main:
+		print('\n---------- RESUMING ----------')
+	else:
+		print('\n---------- QUITTING ----------')
 	if 'time_start' in globals():
 		time_start += time.time() - time_paused
 	signal.signal(signal.SIGINT, exit_gracefully)
@@ -104,38 +91,31 @@ original_sigint = signal.getsignal(signal.SIGINT)
 signal.signal(signal.SIGINT, exit_gracefully)
 
 
-class NN(nn.Module):
-	""" Simple NN model. """
+class DQN(nn.Module):
+	""" Deep Q-Network. """
 	def __init__(self):
-		super(NN, self).__init__()
+		super(DQN, self).__init__()
 		num_squares = 6 * edge_length * edge_length
 		num_states = 6 * num_squares
 		num_outputs = 6 * 2
 
-		self.drop1 = nn.AlphaDropout(0.01, True)
-
-		if num_layers == 1:
-			self.lin1 = nn.Linear(num_states, num_outputs)
-		elif num_layers == 2:
-			self.lin1 = nn.Linear(num_states, 2 * num_outputs)
-			self.lin2 = nn.Linear(2 * num_outputs, num_outputs)
+		if num_layers == 2:
+			self.layers = nn.Sequential(
+				nn.Linear(num_states, 2 * num_outputs),
+				nn.SELU(),
+				nn.Linear(2 * num_outputs, num_outputs)
+			)
 		elif num_layers == 3:
-			self.lin1 = nn.Linear(num_states, num_squares)
-			self.lin2 = nn.Linear(num_squares, 2 * num_outputs)
-			self.lin3 = nn.Linear(2 * num_outputs, num_outputs)
-		else:
-			print('Error: Invalid number of layers! (Choose 1 -> 3)')
-			quit()
+			self.layers = nn.Sequential(
+				nn.Linear(num_states, num_squares),
+				nn.SELU(),
+				nn.Linear(num_squares, 2 * num_outputs),
+				nn.SELU(),
+				nn.Linear(2 * num_outputs, num_outputs)
+			)
 
 	def forward(self, x):
-		if num_layers >= 1:
-			x = self.lin1(x)
-		if num_layers >= 2:
-			x = self.drop1(x)
-			x = self.lin2(x)
-		if num_layers >= 3:
-			x = self.lin3(x)
-		return x
+		return self.layers(x)
 
 
 class ReplayMemory(object):
@@ -163,50 +143,49 @@ def select_action(state):
 	""" Generate an action, depending on the current state. """
 	global total_iterations
 	global eps_threshold
-	global extra_rand
 
 	sample = random.random()
 	eps_threshold = EPS_END + (EPS_START - EPS_END) * \
 		np.exp(-1. * total_iterations / EPS_DECAY)
 
-	if att_iter >= cube_hash_memory_size:
-		# Update extra_rand once in a while.
-		if att_iter % (cube_hash_memory_size/20) == 0:
-			extra_rand = update_extra_rand()
-		eps_threshold = max(eps_threshold, extra_rand)
-
 	total_iterations += 1
 	if sample > eps_threshold:
 		with torch.no_grad():
-			return np.argmax(policy_net(state)).view(1)
+			# Take max valid action
+			actions = torch.argsort(policy_net.forward(state), descending=True)
+			actions_idx = 0
+			action = actions[actions_idx]
+			while not check_valid_action(action):
+				actions_idx += 1
+				action = actions[actions_idx]
 	else:
-		return torch.randint(low=0, high=6*2, size=(1,), dtype=torch.long)
+		# Take random valid action
+		action = torch.randint(low=0, high=6*2, size=(1,), dtype=torch.long)[0]
+		while not check_valid_action(action):
+			action = torch.randint(low=0, high=6*2, size=(1,), dtype=torch.long)[0]
+
+	recent_actions[total_iterations % 3] = int(action)
+	return action.view(1)
 
 
-def update_extra_rand():
-	"""
-	Determine how much extra randomness should be introduced,
-	depending on the number of identical recent states.
-	Introduces considerable cost when >> 1000 dict elements.
-	"""
-	# Using PyTorch takes slightly longer for small dictionaries (1000 elems).
-	# cube_hash_dict_values = torch.tensor(list(cube_hash_dict.values()))
-	# num_duplicates = torch.sum(cube_hash_dict_values > 1)
+def check_valid_action(action):
+	""" Returns whether the given action is valid, given the rule-set. """
+	flag_valid_action = True
 
-	num_duplicates = sum([x - 1 for x in cube_hash_dict.values()])
-	extra_rand = (num_duplicates ** extra_rand_scaling_power) / (cube_hash_memory_size ** extra_rand_scaling_power)
-	extra_rand *= extra_rand_max
+	# Disallow moves that counter the previous move.
+	prev_action = recent_actions[(total_iterations - 1) % 3]
+	if action % 2 == 0:
+		if prev_action == action + 1:
+			flag_valid_action = False
+	else:
+		if prev_action == action - 1:
+			flag_valid_action = False
 
-	return extra_rand
+	# Disallow 4 similar consecutive moves.
+	if recent_actions[0] == action and len(set(recent_actions)) == 1:
+		flag_valid_action = False
 
-
-def clear_cube_hashes():
-	""" Clear the past cube state memory. """
-	global cube_hash_memory
-	global cube_hash_dict
-
-	cube_hash_memory = [0] * cube_hash_memory_size
-	cube_hash_dict = {}
+	return flag_valid_action
 
 
 def optimize_model():
@@ -217,6 +196,7 @@ def optimize_model():
 	batch = Transition(*zip(*transitions))
 
 	state_batch = torch.cat(batch.state).reshape(-1, 6 * 6 * edge_length * edge_length)
+	next_state_batch = torch.cat(batch.next_state).reshape(-1, 6 * 6 * edge_length * edge_length)
 	action_batch = torch.cat(batch.action)
 	reward_batch = torch.cat(batch.reward)
 
@@ -225,9 +205,9 @@ def optimize_model():
 	state_action_values = policy_net(state_batch).gather(1, action_batch.unsqueeze(1))
 
 	# Compute V(s_{t+1}) for all next states.
-	next_state_values = target_net(state_batch).max(1)[0].detach()
+	next_state_values = policy_net(next_state_batch).max(1)[0].detach()
 	# Compute the expected Q values.
-	expected_state_action_values = (next_state_values * GAMMA) + reward_batch
+	expected_state_action_values = reward_batch + GAMMA * next_state_values
 
 	# Compute Huber loss.
 	loss = F.smooth_l1_loss(state_action_values, expected_state_action_values.unsqueeze(1))
@@ -236,7 +216,7 @@ def optimize_model():
 	optimizer.zero_grad()
 	loss.backward()
 	for param in policy_net.parameters():
-		param.grad.data.clamp_(-1, 1)
+		param.grad.data.clamp_(-6, 6)
 	optimizer.step()
 
 
@@ -265,9 +245,9 @@ def reward_function(cube):
 	reward += total_correct
 
 	for face_idx,face in enumerate(cube.faces):
-		# Provides up to 1 extra point for each face, depending on colour correctness.
+		# Provides up to 2 extra points for each face, depending on colour correctness.
 		num_correct_colours = np.sum(face.flatten() == face_idx)
-		reward += num_correct_colours / (cube.edge_length * cube.edge_length)
+		reward += 2 * num_correct_colours / (cube.edge_length * cube.edge_length)
 
 	return total_correct, reward
 
@@ -473,14 +453,14 @@ def show_solved_stats():
 	print()
 	print('Solved statistics:')
 	for idx,stat in enumerate(solved_stats):
-		print('Cube {0:>3} (Attempt {1:>3}): Iterations: {2:>7}, Time: {3:>5}, Seed: {4:>10}'.format(
+		print('Cube {0:>3} (Attempt {1:>3}): Rotations: {2:>7}, Time: {3:>5}, Seed: {4:>10}'.format(
 			idx, stat[0], stat[1], int(stat[2]), stat[3]))
 	print()
 
 
 def show_best_cube_statistics(cube, max_correct):
 	""" Show the given best cube and its number of correct squares. """
-	print('\n\nAttempt seed: {0}'.format(attempt_seeds[-1]))
+	print('\n\nAttempt {0} (seed: {1})'.format(attempt_num, attempt_seeds[-1]))
 	print('Best cube ({0} correct blocks):'.format(int(max_correct)))
 	print(cube)
 
@@ -496,7 +476,6 @@ def solution_attempt():
 	global best_cube
 	global max_correct
 	global att_iter
-	global cube_hash_dict
 	global flag_continue_attempt
 
 	# Dictates continuation of each attempt.
@@ -520,8 +499,6 @@ def solution_attempt():
 	running_num_correct = [0] * running_stats_length
 	running_reward = [0] * running_stats_length
 
-	clear_cube_hashes()
-
 	if flag_deliberate_attempt:
 		# Used to translate the cube's state into boolean values.
 		state_grid = torch.arange(start=0, end=num_states, step=6, dtype=torch.int64)
@@ -539,26 +516,6 @@ def solution_attempt():
 			rotation = action % 2
 			# Take the action.
 			cube.rotate(face, rotation)
-
-			# Hash the cube's current state.
-			cube_hash = hashlib.sha1(cube.faces).digest()
-
-			if att_iter > cube_hash_memory_size:
-				# Decrement or delete oldest hash, depending on its number of occurences.
-				if cube_hash_dict[cube_hash_memory[att_iter % cube_hash_memory_size]] == 1:
-					del cube_hash_dict[cube_hash_memory[att_iter % cube_hash_memory_size]]
-				else:
-					cube_hash_dict[cube_hash_memory[att_iter % cube_hash_memory_size]] -= 1
-
-			# Overwrite oldest space with newest hash.
-			cube_hash_memory[att_iter % cube_hash_memory_size] = cube_hash
-
-			# Increment or create the newest hash in the hash dict.
-			if cube_hash in cube_hash_dict:
-				cube_hash_dict[cube_hash] += 1
-			else:
-				cube_hash_dict[cube_hash] = 1
-
 		else:
 			# Take a random action.
 			cube.random_rotation()
@@ -589,13 +546,9 @@ def solution_attempt():
 			memory.push(state, action, next_state, torch.as_tensor([reward]))
 			state = next_state
 
-			if att_iter % BATCH_SIZE == 0:
+			if total_iterations % BATCH_SIZE == 0:
 				# Perform one step of the optimization.
 				optimize_model()
-
-			if att_iter % TARGET_UPDATE == 0:
-				# Update the target network.
-				target_net.load_state_dict(policy_net.state_dict())
 
 		if att_iter % 1000 == 0:
 			show_stats(
@@ -608,7 +561,6 @@ def solution_attempt():
 		if flag_term_point and att_iter % term_iter == 0:
 			print('\n\nTermination point reached.')
 			show_best_cube_statistics(best_cube, max_correct)
-			clear_cube_hashes()
 			attempt_num += 1
 			print('Creating a new cube.')
 			cube = Cube(edge_length=edge_length)
@@ -635,7 +587,6 @@ def main():
 
 	global memory
 	global policy_net
-	global target_net
 	global optimizer
 
 	# Read all command-line parameters.
@@ -645,7 +596,7 @@ def main():
 			if opt in ('-h', '--help'):
 				print('Options:')
 				print(' -s N, --size=N      number of squares per Cube edge (default: 2)')
-				print(' -l N, --layers=N    number of layers in the NN (default: 2)')
+				print(' -l N, --layers=N    number of layers in the NN (default: 2, allowable: 2, 3)')
 				print(' --seed=N            set the RNG seed')
 				print(' --random            only use random choices, no AI')
 				print(' -h, --help          display this help page and exit')
@@ -661,22 +612,26 @@ def main():
 					else:
 						print('Provided cube size is not valid. '
 							+ 'Setting to default of {0}.'.format(edge_length))
+						time.sleep(3)
 				except ValueError:
 					print('Provided cube size is not valid. '
 						+ 'Setting to default of {0}.'.format(edge_length))
+					time.sleep(3)
 
 			elif opt in ('-l', '--layers'):
 				try:
 					arg = int(arg)
-					if arg >= 1:
+					if arg in [2, 3]:
 						num_layers = int(arg)
 						print('NN layers set to {0}.'.format(num_layers))
 					else:
 						print('Provided number of layers is not valid. '
 							+ 'Setting to default of {0}.'.format(num_layers))
+						time.sleep(3)
 				except ValueError:
 					print('Provided number of layers is not valid. '
 						+ 'Setting to default of {0}.'.format(num_layers))
+					time.sleep(3)
 
 			elif opt in ('--seed'):
 				try:
@@ -685,6 +640,7 @@ def main():
 					print('RNG seed set to {0}'.format(root_seed))
 				except ValueError:
 					print('Provided RNG seed is not valid.')
+					time.sleep(3)
 
 			elif opt in ('--random'):
 				flag_deliberate_attempt = False
@@ -696,11 +652,8 @@ def main():
 		print('Call with option \'--help\' for the help page.\n\n')
 		quit()
 
-	# Creation of NNs and related objects.
-	policy_net = NN()
-	target_net = NN()
-	target_net.load_state_dict(policy_net.state_dict())
-	target_net.eval()
+	# Creation of DQN and related objects.
+	policy_net = DQN()
 	optimizer = optim.RMSprop(policy_net.parameters())
 	memory = ReplayMemory(TRANSITION_MEMORY_SIZE)
 

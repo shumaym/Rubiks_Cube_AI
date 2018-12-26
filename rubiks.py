@@ -8,7 +8,7 @@ console_block = u'\u25a0'
 # Default console text colour.
 text_colour_white  = '\033[0m'
 # Number of random rotations to make during a Cube's scrambling.
-scramble_iterations = 100000
+scramble_iterations = 25000
 
 # Colours of the Rubik's Cube.
 colours = {
