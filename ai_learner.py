@@ -1,11 +1,13 @@
 import numpy as np
 import random
 import time
+import queue
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from collections import namedtuple
+from collections import namedtuple, deque
+import itertools
 import signal
 import getopt
 import sys
@@ -39,13 +41,14 @@ Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'
 BATCH_SIZE = 4096
 GAMMA = 0.95
 EPS_START = 0.975
-EPS_END = 0.025
+EPS_END = 0.03
 EPS_DECAY = 1000000
-TRANSITION_MEMORY_SIZE = 10000
+TRANSITION_MEMORY_SIZE = 15000
 total_iterations = 0
 
 # Memory of the past 3 actions, used for simple rule enforcement.
-recent_actions = [-1, -1, -1]
+recent_actions_len = 7
+recent_actions = deque([-1] * recent_actions_len, maxlen=recent_actions_len)
 
 
 def exit_gracefully(signum, frame):
@@ -113,6 +116,16 @@ class DQN(nn.Module):
 				nn.SELU(),
 				nn.Linear(2 * num_outputs, num_outputs)
 			)
+		elif num_layers == 4:
+			self.layers = nn.Sequential(
+				nn.Linear(num_states, num_squares),
+				nn.SELU(),
+				nn.Linear(num_squares, num_squares),
+				nn.SELU(),
+				nn.Linear(num_squares, 2 * num_outputs),
+				nn.SELU(),
+				nn.Linear(2 * num_outputs, num_outputs)
+			)
 
 	def forward(self, x):
 		return self.layers(x)
@@ -148,7 +161,6 @@ def select_action(state):
 	eps_threshold = EPS_END + (EPS_START - EPS_END) * \
 		np.exp(-1. * total_iterations / EPS_DECAY)
 
-	total_iterations += 1
 	if sample > eps_threshold:
 		with torch.no_grad():
 			# Take max valid action
@@ -164,7 +176,8 @@ def select_action(state):
 		while not check_valid_action(action):
 			action = torch.randint(low=0, high=6*2, size=(1,), dtype=torch.long)[0]
 
-	recent_actions[total_iterations % 3] = int(action)
+	recent_actions.append(int(action))
+	total_iterations += 1
 	return action.view(1)
 
 
@@ -173,16 +186,15 @@ def check_valid_action(action):
 	flag_valid_action = True
 
 	# Disallow moves that counter the previous move.
-	prev_action = recent_actions[(total_iterations - 1) % 3]
 	if action % 2 == 0:
-		if prev_action == action + 1:
+		if recent_actions[-1] == action + 1:
 			flag_valid_action = False
 	else:
-		if prev_action == action - 1:
+		if recent_actions[-1] == action - 1:
 			flag_valid_action = False
 
 	# Disallow 4 similar consecutive moves.
-	if recent_actions[0] == action and len(set(recent_actions)) == 1:
+	if recent_actions[-1] == action and len(set(itertools.islice(recent_actions, len(recent_actions) - 3, len(recent_actions)))) == 1:
 		flag_valid_action = False
 
 	return flag_valid_action
@@ -269,7 +281,7 @@ def check_edges(faces, edge_length):
 	"""
 	num_correct_edges = 0
 
-	for face_idx in [0, 5]:
+	for face_idx in [0, 1, 3, 5]:
 		# Face above.
 		u_face_colour = face_relations['_'.join([str(face_idx), 'u'])]
 		u_face = faces[u_face_colour]
@@ -287,54 +299,78 @@ def check_edges(faces, edge_length):
 		r_face = faces[r_face_colour]
 
 		if face_idx == 0:
+			# Check all 4 sides of face 0
 			for edge_idx in range(1, edge_length - 1):
 				# Upper edge
 				if faces[face_idx, 0, edge_idx] == face_idx:
 					u_face_edge = u_face[-1, edge_idx]
 					if u_face_edge == u_face_colour:
 						num_correct_edges += 1
-
 				# Left edge
 				if faces[face_idx, edge_idx, 0] == face_idx:
 					l_face_edge = l_face[edge_idx, -1]
 					if l_face_edge == l_face_colour:
 						num_correct_edges += 1
-
 				# Bottom edge
 				if faces[face_idx, -1, edge_idx] == face_idx:
 					d_face_edge = d_face[0, edge_idx]
 					if d_face_edge == d_face_colour:
 						num_correct_edges += 1
-
 				# Right edge
 				if faces[face_idx, edge_idx, -1] == face_idx:
 					r_face_edge = r_face[edge_idx, 0]
 					if r_face_edge == r_face_colour:
 						num_correct_edges += 1
 
-		if face_idx == 5:
+		elif face_idx == 1:
+			# Check left and right sides of face 1
+			for edge_idx in range(1, edge_length - 1):
+				# Left edge
+				if faces[face_idx, edge_idx, 0] == face_idx:
+					l_face_edge = l_face[0, edge_idx]
+					if l_face_edge == l_face_colour:
+						num_correct_edges += 1
+				# Right edge
+				if faces[face_idx, edge_idx, -1] == face_idx:
+					r_face_edge = r_face[0, -1-edge_idx]
+					if r_face_edge == r_face_colour:
+						num_correct_edges += 1
+
+		elif face_idx == 3:
+			# Check left and right sides of face 3
+			for edge_idx in range(1, edge_length - 1):
+				# Left edge
+				if faces[face_idx, edge_idx, 0] == face_idx:
+					l_face_edge = l_face[-1, -1-edge_idx]
+					if l_face_edge == l_face_colour:
+						num_correct_edges += 1
+				# Right edge
+				if faces[face_idx, edge_idx, -1] == face_idx:
+					r_face_edge = r_face[-1, edge_idx]
+					if r_face_edge == r_face_colour:
+						num_correct_edges += 1
+
+		elif face_idx == 5:
+			# Check all 4 sides of face 5
 			for edge_idx in range(1, edge_length - 1):
 				# Upper edge
 				if faces[face_idx, 0, edge_idx] == face_idx:
 					u_face_edge = u_face[0, -1-edge_idx]
 					if u_face_edge == u_face_colour:
 						num_correct_edges += 1
-
 				# Left edge
 				if faces[face_idx, edge_idx, 0] == face_idx:
 					l_face_edge = l_face[edge_idx, -1]
 					if l_face_edge == l_face_colour:
 						num_correct_edges += 1
-
 				# Bottom edge
 				if faces[face_idx, -1, edge_idx] == face_idx:
 					d_face_edge = d_face[-1, -1-edge_idx]
 					if d_face_edge == d_face_colour:
 						num_correct_edges += 1
-
 				# Right edge
 				if faces[face_idx, edge_idx, -1] == face_idx:
-					r_face_edge = r_face[edge_idx, -1]
+					r_face_edge = r_face[edge_idx, 0]
 					if r_face_edge == r_face_colour:
 						num_correct_edges += 1
 
@@ -372,7 +408,6 @@ def check_corners(faces):
 					u_face_corner = u_face[-1, 0]
 					if u_face_corner == u_face_colour:
 						num_correct_corners += 1
-
 			# Top-right
 			if faces[face_idx, 0, -1] == face_idx:
 				r_face_corner = r_face[0, 0]
@@ -380,7 +415,6 @@ def check_corners(faces):
 					u_face_corner = u_face[-1, -1]
 					if u_face_corner == u_face_colour:
 						num_correct_corners += 1
-
 			# Bottom-left
 			if faces[face_idx, -1, 0] == face_idx:
 				l_face_corner = l_face[-1, -1]
@@ -388,7 +422,6 @@ def check_corners(faces):
 					d_face_corner = d_face[0, 0]
 					if d_face_corner == d_face_colour:
 						num_correct_corners += 1
-
 			# Bottom-right
 			if faces[face_idx, -1, -1] == face_idx:
 				r_face_corner = r_face[-1, 0]
@@ -405,7 +438,6 @@ def check_corners(faces):
 					u_face_corner = u_face[0, -1]
 					if u_face_corner == u_face_colour:
 						num_correct_corners += 1
-
 			# Top-right
 			if faces[face_idx, 0, -1] == face_idx:
 				r_face_corner = r_face[0, 0]
@@ -413,7 +445,6 @@ def check_corners(faces):
 					u_face_corner = u_face[0, 0]
 					if u_face_corner == u_face_colour:
 						num_correct_corners += 1
-
 			# Bottom-left
 			if faces[face_idx, -1, 0] == face_idx:
 				l_face_corner = l_face[-1, -1]
@@ -421,7 +452,6 @@ def check_corners(faces):
 					d_face_corner = d_face[-1, -1]
 					if d_face_corner == d_face_colour:
 						num_correct_corners += 1
-
 			# Bottom-right
 			if faces[face_idx, -1, -1] == face_idx:
 				r_face_corner = r_face[-1, 0]
@@ -487,7 +517,7 @@ def solution_attempt():
 
 	print('\n\nScrambling...')
 	cube.scramble()
-	
+
 	num_squares = 6 * cube.edge_length * cube.edge_length
 	num_states = num_squares * 6
 	att_iter = 0
@@ -621,7 +651,7 @@ def main():
 			elif opt in ('-l', '--layers'):
 				try:
 					arg = int(arg)
-					if arg in [2, 3]:
+					if arg in [2, 3, 4]:
 						num_layers = int(arg)
 						print('NN layers set to {0}.'.format(num_layers))
 					else:
