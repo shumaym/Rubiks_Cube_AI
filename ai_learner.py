@@ -11,6 +11,7 @@ import itertools
 import signal
 import getopt
 import sys
+
 from rubiks import Cube, face_relations
 
 # Number of blocks along each edge of the Cube.
@@ -100,7 +101,7 @@ class DQN(nn.Module):
 		super(DQN, self).__init__()
 		num_squares = 6 * edge_length * edge_length
 		num_states = 6 * num_squares
-		num_outputs = 6 * 2
+		num_outputs = 6*2 + 4*(edge_length-2)
 
 		if num_layers == 2:
 			self.layers = nn.Sequential(
@@ -491,7 +492,7 @@ def show_solved_stats():
 def show_best_cube_statistics(cube, max_correct):
 	""" Show the given best cube and its number of correct squares. """
 	print('\n\nAttempt {0} (seed: {1})'.format(attempt_num, attempt_seeds[-1]))
-	print('Best cube ({0} correct blocks):'.format(int(max_correct)))
+	print('Best cube ({0} correct squares):'.format(int(max_correct)))
 	print(cube)
 
 
@@ -515,7 +516,7 @@ def solution_attempt():
 	print('\nOriginal cube:')
 	print(cube)
 
-	print('\n\nScrambling...')
+	print('\nScrambling...')
 	cube.scramble()
 
 	num_squares = 6 * cube.edge_length * cube.edge_length
@@ -542,10 +543,8 @@ def solution_attempt():
 		if flag_deliberate_attempt:
 			# Select an action, depending on the current state.
 			action = select_action(state)
-			face = int(action / 2)
-			rotation = action % 2
 			# Take the action.
-			cube.rotate(face, rotation)
+			cube.rotate(int(action))
 		else:
 			# Take a random action.
 			cube.random_rotation()
