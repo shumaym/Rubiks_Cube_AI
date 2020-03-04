@@ -3,8 +3,7 @@
 The goal of this project is to make a simple AI learn a Rubik's Cube from scratch, provided no prior knowledge of the puzzle.
 No algorithms specific to solving Rubik's Cubes are in place, so the AI learns solely through trial and error.
 
-```rubiks.py``` creates and scrambles a Rubik's Cube, and can output a flattened, coloured visual representation to the console.
-Currently, only the rotation of faces is supported, so cubes larger than 3x3x3 cannot be fully manipulated.
+```rubiks.py``` creates and scrambles a Rubik's Cube, and can output a flattened, coloured visual representation to the console. Any cube size may be created and fully manipulated.
 
 ```ai_learner.py``` attempts to solve a Rubik's Cube strictly through Deep Q-Learning.
 The current reward system primarily focuses on the number of entirely-correct blocks.
